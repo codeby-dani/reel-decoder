@@ -34,7 +34,9 @@ else:
     JEV_URL, JEV_KEY_ENV = "https://api.typesafe.ai/v1/systemone", "TYPESAFE_API_KEY"
     JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-latest"
 MAX_SENTENCES = 40
-WORKERS = 8  # reels transcribed / labelled at the same time
+WORKERS = 8      # reels transcribed / labelled by GPT at the same time
+JEV_WORKERS = 4  # Jev's upstream rate-limits bursts, so fewer at once
+PROGRESS_STORE = "reel-decoder-progress"  # Apify key-value store the dashboard reads
 
 # The taxonomy. Keys are the labels; values are the definitions both models see.
 HOOKS = {
@@ -88,6 +90,42 @@ ROLES = {
     "payoff": "The result, proof, demo outcome or key benefit.",
     "pitch": "The call to action: comment, follow, link.",
 }
+
+
+# ---------- progress (read by the dashboard through /api/progress) ----------
+
+class Progress:
+    """Writes {stage, done, total, ...} to an Apify key-value record, at most every 1.5s."""
+
+    def __init__(self, apify: ApifyClient):
+        self.run_id = os.environ.get("GITHUB_RUN_ID")
+        self.state, self.last, self.lock = {"stage": "starting"}, 0.0, threading.Lock()
+        self.kv = None
+        if self.run_id:
+            try:
+                self.kv = apify.key_value_store(apify.key_value_stores().get_or_create(name=PROGRESS_STORE).id)
+            except Exception as e:
+                print(f"  progress disabled: {e}")
+
+    def update(self, force=False, **fields):
+        with self.lock:
+            self.state.update(fields, updated=time.time())
+            if not self.kv or (not force and time.time() - self.last < 1.5):
+                return
+            self.last = time.time()
+            state = dict(self.state)
+        try:
+            self.kv.set_record(f"run-{self.run_id}", state)
+        except Exception as e:
+            print(f"  progress write failed: {e}")
+
+    def stage(self, name, **fields):
+        self.update(force=True, stage=name, done=0, **fields)
+
+    def tick(self):
+        with self.lock:
+            self.state["done"] = self.state.get("done", 0) + 1
+        self.update(force=self.state["done"] == self.state.get("total"))
 
 
 # ---------- account + scraping ----------
@@ -280,13 +318,27 @@ def main():
         sys.exit("Jev needs AI_GATEWAY_API_KEY (Vercel) or TYPESAFE_API_KEY. Add one as a repo secret or pick gpt.")
     apify, oa = ApifyClient(os.environ["APIFY_TOKEN"]), OpenAI()
 
+    progress = Progress(apify)
+    progress.stage("search" if not re.match(r"@|https?://", args.account.strip()) else "scrape",
+                   account=args.account, models=models)
+    try:
+        run(args, models, apify, oa, progress)
+    except BaseException as e:
+        progress.stage("failed", error=str(e)[:300])
+        raise
+    progress.stage("done")
+
+
+def run(args, models, apify, oa, progress):
     handle = resolve_handle(args.account, apify)
+    progress.stage("scrape", handle=handle)
     reels = scrape_reels(handle, min(max(args.limit, 5), 200), apify)
     folder = DATA / handle
     cache_path = folder / "transcripts.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
 
     todo = [r for r in reels if r["shortCode"] not in cache]
+    progress.stage("transcribe", total=len(reels))
     print(f"Transcribing {len(todo)} reels ({len(reels) - len(todo)} cached), {WORKERS} at a time...")
     t0 = time.time()
 
@@ -294,11 +346,14 @@ def main():
         code = r["shortCode"]
         save_thumb(r.get("displayUrl"), folder / "thumbs" / f"{code}.jpg")
         if code in cache:
+            progress.tick()
             return
         try:
             cache[code] = transcribe(r["videoUrl"], oa)
         except Exception as e:
             print(f"  transcribe failed for {code}: {str(e)[:200]}")  # not cached, so the next run retries
+        finally:
+            progress.tick()
 
     with ThreadPoolExecutor(WORKERS) as pool:
         for i, _ in enumerate(pool.map(fetch, reels), 1):
@@ -322,8 +377,21 @@ def main():
             except Exception as e:
                 return r, sents, None, e
 
-        with ThreadPoolExecutor(WORKERS) as pool:
-            results = list(pool.map(label, reels))
+        progress.stage("label", model=model, total=len(reels))
+
+        def label_and_tick(r):
+            result = label(r)
+            progress.tick()
+            return result
+
+        with ThreadPoolExecutor(JEV_WORKERS if model == "jev" else WORKERS) as pool:
+            results = list(pool.map(label_and_tick, reels))
+        retry = [i for i, res in enumerate(results) if res[3]]
+        if retry:  # one more, slower pass for reels that hit rate limits
+            print(f"  retrying {len(retry)} reels one at a time...")
+            time.sleep(5)
+            for i in retry:
+                results[i] = label(results[i][0])
         for r, sents, lab, err in results:
             code, caption = r["shortCode"], r.get("caption") or ""
             if err:
@@ -357,6 +425,7 @@ def main():
         update_index(handle, full_name, model, len(out))
         summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} in {time.time() - t0:.0f}s "
                 f"({failed} failed, {tokens:,} tokens).")
+    progress.stage("save")
     if broken:
         sys.exit(f"Labelling failed completely for: {', '.join(broken)}. See the errors above.")
 

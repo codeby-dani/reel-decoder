@@ -139,6 +139,15 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
 .msg.err{color:var(--bad)} .msg.ok{color:var(--good)}
 .runs{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .run{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.job{display:flex;flex-direction:column;gap:10px;border-color:var(--accent)}
+.job-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline}
+.job-head b{font:700 18px var(--display);font-stretch:85%}
+.pbar{height:10px;border-radius:6px;background:var(--line);overflow:hidden}
+.pbar span{display:block;height:100%;width:0;background:var(--accent);border-radius:6px;transition:width .6s ease}
+.job.ok .pbar span{background:var(--good)} .job.err .pbar span{background:var(--bad)} .job.err{border-color:var(--bad)} .job.ok{border-color:var(--good)}
+.steps{display:flex;flex-wrap:wrap;gap:6px 14px;font:500 12px var(--mono);color:var(--muted)}
+.steps .on{color:var(--ink)} .steps .now{color:var(--accent)}
+@media (prefers-reduced-motion:reduce){.pbar span{transition:none}}
 .pill{font:500 11px var(--mono);text-transform:uppercase;letter-spacing:.05em;border-radius:999px;padding:2px 8px;border:1px solid currentColor;white-space:nowrap}
 .empty{padding:40px 20px;text-align:center;color:var(--muted)}
 </style>
@@ -162,6 +171,14 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
     </div>
     <button class="new" id="new" type="button" aria-expanded="false" aria-controls="decoder">+ Decode a new account</button>
   </nav>
+
+  <section class="panel job" id="job" hidden aria-live="polite">
+    <div class="job-head"><b id="job-title"></b><span class="lbl" id="job-time"></span></div>
+    <div class="pbar" role="progressbar" aria-label="Decode progress" aria-valuemin="0" aria-valuemax="100" id="job-pbar"><span id="job-bar"></span></div>
+    <div class="job-head"><span id="job-stage"></span><span class="note" id="job-eta"></span></div>
+    <div class="steps" id="job-steps"></div>
+    <div id="job-actions"></div>
+  </section>
 
   <section class="panel decoder" id="decoder" hidden>
     <div>
@@ -445,8 +462,8 @@ $("go").onclick = async ()=>{
   $("go").disabled = true;
   try {
     const r = await api("decode", { handle: pick, model: dmodel, limit: $("dlimit").value });
-    say(`Started decoding @${r.handle} with ${MODELS[r.model]||"GPT + Jev"} (${r.limit} reels). About 10–15 minutes; this list updates by itself.`, "ok");
-    setTimeout(loadRuns, 4000);
+    say(`Started decoding @${r.handle} with ${MODELS[r.model]||"GPT + Jev"} (${r.limit} reels). Progress is shown at the top.`, "ok");
+    findNewRun(Date.now(), r);
   } catch(err){ say(err.message, "err"); }
   $("go").disabled = false;
 };
@@ -458,12 +475,121 @@ async function loadRuns(){
       const st = w.status!=="completed" ? ["running","var(--accent)"] : w.conclusion==="success" ? ["done","var(--good)"] : [w.conclusion||"failed","var(--bad)"];
       return `<div class="run"><a href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}</a><span class="pill" style="color:${st[1]}">${esc(st[0])}</span></div>`; }).join("")
       : '<span class="note">No runs yet.</span>';
-    const latest = runs[0];
-    if(latest && latest.status==="completed" && latest.conclusion==="success" && Date.now()-new Date(latest.updated) < 5*60e3)
-      $("runs").insertAdjacentHTML("beforeend", `<p class="note">The latest run finished. Vercel redeploys in about a minute, then <button class="btn" type="button" onclick="location.reload()" style="padding:4px 10px">reload</button></p>`);
   } catch(err){ $("runs").innerHTML = `<span class="note">${esc(err.message)}</span>`; }
 }
 
-boot();
+// ---------- live progress of a decode ----------
+const STEPS = [["queue","Queue"],["setup","Setup"],["scrape","Scrape"],["transcribe","Transcribe"],["label","Label"],["save","Save"],["publish","Publish"]];
+let job = null, jobTimer = null, clockTimer = null;
+
+function findNewRun(since, req){
+  const until = Date.now() + 60000;
+  show({ stageKey:"queue", text:"Sending the job to GitHub…", pct:2, title:`Decoding @${req.handle}`, started:since, limit:req.limit, models: req.model==="both" ? ["gpt","jev"] : [req.model] });
+  const look = async ()=>{
+    try {
+      const { runs } = await api("runs");
+      const hit = runs.find(w => new Date(w.started) >= since - 15000 && w.title.includes("@"+req.handle));
+      if(hit) return track(hit.id, { limit:req.limit, models: req.model==="both" ? ["gpt","jev"] : [req.model], handle:req.handle });
+    } catch {}
+    if(Date.now() < until) setTimeout(look, 3000);
+    else show({ stageKey:"queue", text:"GitHub hasn't picked up the job yet. Check Recent runs.", pct:2, err:true });
+  };
+  setTimeout(look, 3000);
+}
+
+function track(id, hint = {}){
+  job = { id, hint, started: null, published: false };
+  store.set("job", JSON.stringify({ id, hint }));
+  clearTimeout(jobTimer); poll();
+}
+
+async function poll(){
+  if(!job) return;
+  let d;
+  try { d = await api(`progress?run=${job.id}`); } catch(e){ jobTimer = setTimeout(poll, 5000); return; }
+  job.started = new Date(d.started).getTime();
+  const p = d.progress || {}, models = p.models || job.hint.models || ["gpt"], n = p.total || job.hint.limit || 50;
+  const handle = p.handle || job.hint.handle || (d.title.match(/@([\w.]+)/)||[])[1];
+  const title = `Decoding @${handle || "…"} with ${models.map(m=>MODELS[m]).join(" + ")}`;
+  const base = { title, started: job.started, limit: n, models, url: d.url };
+
+  if(d.status === "completed" && d.conclusion !== "success"){
+    store.set("job", "");
+    return show({ ...base, stageKey: p.stage==="failed" ? "save" : "setup", err:true, pct:100,
+      text: p.error ? `Failed: ${p.error}` : `The run ${d.conclusion || "failed"}.` });
+  }
+  if(d.status === "completed"){
+    // GitHub is done; wait until Vercel serves the new data
+    const ready = handle && (await Promise.all(models.map(async m=>{
+      try { const j = await (await fetch(`data/${handle}/${m}.json?t=${Date.now()}`, {cache:"no-store"})).json(); return new Date(j.generated).getTime() >= job.started - 60000; } catch { return false; }
+    }))).every(Boolean);
+    if(ready){ store.set("job", ""); return show({ ...base, stageKey:"done", ok:true, pct:100, text:"Done. The dashboard is live.", handle }); }
+    show({ ...base, stageKey:"publish", pct:95, text:"Publishing to the dashboard (Vercel redeploy)…" });
+    jobTimer = setTimeout(poll, 4000); return;
+  }
+  if(d.status === "queued") show({ ...base, stageKey:"queue", pct:3, text:"Waiting for a GitHub runner…" });
+  else {
+    const st = p.stage, frac = p.total ? (p.done||0)/p.total : 0;
+    const k = models.indexOf(p.model);
+    const view = !st || st==="starting" ? ["setup", 8, "Setting up the runner…"]
+      : st==="search" ? ["scrape", 12, `Searching Instagram for “${p.account}”…`]
+      : st==="scrape" ? ["scrape", 18, `Scraping @${handle}'s recent reels…`]
+      : st==="transcribe" ? ["transcribe", 25 + 40*frac, `Transcribing ${p.done||0}/${p.total} reels`]
+      : st==="label" ? ["label", 65 + 25*((Math.max(k,0) + frac)/models.length), `Labelling ${p.done||0}/${p.total} reels with ${MODELS[p.model]||p.model}`]
+      : st==="save" || st==="done" ? ["save", 92, "Saving results…"] : ["setup", 8, st];
+    show({ ...base, stageKey:view[0], pct:view[1], text:view[2], progress:p });
+  }
+  jobTimer = setTimeout(poll, 2500);
+}
+
+// Rough remaining time from typical stage durations (seconds), for the "about N left" hint.
+function eta(v){
+  const per = { gpt:0.5, jev:0.8 }, n = v.limit || 50, m = v.models || ["gpt"];
+  const plan = { queue:15, setup:25, scrape:45, transcribe:0.7*n, label:m.reduce((a,x)=>a+(per[x]||0.6)*n,0), save:3, publish:45 };
+  const order = STEPS.map(s=>s[0]), i = order.indexOf(v.stageKey);
+  if(i < 0) return null;
+  let left = order.slice(i+1).reduce((a,k)=>a+plan[k],0);
+  const p = v.progress;
+  left += (p && p.total && ["transcribe","label"].includes(v.stageKey)) ? plan[v.stageKey]*(1-(p.done||0)/p.total) : plan[v.stageKey]/2;
+  return Math.max(5, Math.round(left));
+}
+
+function show(v){
+  job = job || { id:null };
+  job.view = v;
+  $("job").hidden = false;
+  $("job").className = "panel job" + (v.ok ? " ok" : v.err ? " err" : "");
+  $("job-title").textContent = v.ok ? `@${v.handle} is decoded` : v.title || $("job-title").textContent;
+  $("job-bar").style.width = Math.min(100, v.pct) + "%";
+  $("job-pbar").setAttribute("aria-valuenow", Math.round(v.pct));
+  $("job-stage").textContent = v.text;
+  const order = STEPS.map(s=>s[0]), i = v.stageKey==="done" ? order.length : order.indexOf(v.stageKey);
+  $("job-steps").innerHTML = STEPS.map(([k,l],j)=>`<span class="${j<i?'on':j===i&&!v.err?'now':''}">${j<i?'✓':j===i?(v.err?'✕':'●'):'○'} ${l}</span>`).join("");
+  const left = !v.ok && !v.err ? eta(v) : null;
+  $("job-eta").textContent = left ? `about ${left>=90 ? Math.round(left/60)+" min" : left+" s"} left` : "";
+  $("job-actions").innerHTML = v.ok ? `<button class="btn" type="button" id="job-open">Open @${esc(v.handle)}</button>`
+    : v.err && v.url ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">See the log on GitHub ↗</a>` : "";
+  if(v.ok) $("job-open").onclick = async ()=>{
+    INDEX = ((await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts||[]).filter(a=>a.reels>0);
+    const acc = INDEX.find(a=>a.handle===v.handle); if(acc) openAccount(acc, v.models[0]);
+    $("job").hidden = true; window.scrollTo({top:0, behavior:"smooth"});
+  };
+  clearInterval(clockTimer);
+  const tickClock = ()=>{ if(!v.started) return; const s = Math.max(0, Math.round((Date.now()-v.started)/1000)); $("job-time").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")} elapsed`; };
+  tickClock(); if(!v.ok && !v.err) clockTimer = setInterval(tickClock, 1000);
+}
+
+// Resume tracking after a reload, or pick up a run started elsewhere (e.g. from GitHub).
+async function resumeJob(){
+  try {
+    const saved = JSON.parse(store.get("job") || "null");
+    if(saved?.id) return track(saved.id, saved.hint || {});
+    const { runs } = await api("runs");
+    const live = runs.find(w => w.status !== "completed");
+    if(live) track(live.id);
+  } catch {}
+}
+
+boot().then(resumeJob);
 </script>
 </body></html>

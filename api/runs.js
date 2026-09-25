@@ -13,6 +13,7 @@ module.exports = async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.status(200).json({
     runs: workflow_runs.map((w) => ({
+      id: w.id,
       title: w.display_title,
       status: w.status,
       conclusion: w.conclusion,
