@@ -1,0 +1,4 @@
+apify-client>=1.8
+openai>=1.60
+requests>=2.32
+pillow>=10.4
