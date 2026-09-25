@@ -1,4 +1,5 @@
 name: Decode an account
+run-name: Decode ${{ inputs.account }} (${{ inputs.model }})
 
 on:
   workflow_dispatch:
@@ -17,8 +18,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: decode
@@ -28,8 +27,6 @@ jobs:
   decode:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment:
-      name: github-pages
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,6 +43,7 @@ jobs:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
           GPT_MODEL: ${{ vars.GPT_MODEL }}
           TRANSCRIBE_MODEL: ${{ vars.TRANSCRIBE_MODEL }}
           ACCOUNT: ${{ inputs.account }}
@@ -64,8 +62,3 @@ jobs:
           git commit -m "Decode $ACCOUNT ($MODEL)"
           git pull --rebase
           git push
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-      - uses: actions/deploy-pages@v4

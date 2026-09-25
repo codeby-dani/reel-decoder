@@ -117,7 +117,28 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
 .seg-ctl button[aria-pressed="true"]{background:var(--ink);color:var(--surface)}
 .seg-ctl button:disabled{opacity:.35;cursor:not-allowed}
 .seg-ctl button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.new{margin-left:auto;font:600 14px var(--body);color:var(--accent);text-decoration:none;border:1px solid var(--accent);border-radius:8px;padding:8px 12px}
+.new{margin-left:auto;font:600 14px var(--body);color:var(--accent);background:none;cursor:pointer;border:1px solid var(--accent);border-radius:8px;padding:8px 12px}
+.new[aria-expanded="true"]{background:var(--accent);color:var(--surface)}
+.decoder{display:grid;grid-template-columns:1.2fr 1fr;gap:20px}
+@media (max-width:900px){.decoder{grid-template-columns:1fr}}
+.decoder input{font:500 15px var(--body);padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);min-width:0}
+.decoder input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
+.row > *{flex:1 1 auto}
+.btn{font:600 14px var(--body);border:0;border-radius:8px;padding:10px 16px;background:var(--ink);color:var(--surface);cursor:pointer;flex:0 0 auto}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.users{display:flex;flex-direction:column;gap:4px;margin-top:10px}
+.user{display:grid;grid-template-columns:36px 1fr auto;gap:10px;align-items:center;text-align:left;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);padding:6px 10px;cursor:pointer;font:14px var(--body)}
+.user[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.user img,.user .ph{width:36px;height:36px;border-radius:50%;object-fit:cover;background:var(--line)}
+.user small{color:var(--muted);font:12px var(--mono)}
+.field{display:flex;flex-direction:column;gap:4px}
+.msg{font-size:14px;min-height:1.5em}
+.msg.err{color:var(--bad)} .msg.ok{color:var(--good)}
+.runs{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.run{display:flex;justify-content:space-between;gap:10px;font-size:13.5px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.pill{font:500 11px var(--mono);text-transform:uppercase;letter-spacing:.05em;border-radius:999px;padding:2px 8px;border:1px solid currentColor;white-space:nowrap}
 .empty{padding:40px 20px;text-align:center;color:var(--muted)}
 </style>
 
@@ -138,8 +159,32 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
       <span class="lbl" style="display:block;margin-bottom:4px">Labelled by</span>
       <div class="seg-ctl" id="models" role="group" aria-label="Model"></div>
     </div>
-    <a class="new" id="new" target="_blank" rel="noopener">+ Decode a new account ↗</a>
+    <button class="new" id="new" type="button" aria-expanded="false" aria-controls="decoder">+ Decode a new account</button>
   </nav>
+
+  <section class="panel decoder" id="decoder" hidden>
+    <div>
+      <h2 style="margin-bottom:10px">Find an account</h2>
+      <form class="row" id="igform">
+        <div class="field" style="flex:1 1 220px"><label class="lbl" for="igq">Name or handle</label><input id="igq" placeholder="e.g. nate herk"></div>
+        <button class="btn" id="igbtn" type="submit">Search Instagram</button>
+      </form>
+      <div class="users" id="users"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <h2>Run the decode</h2>
+      <div class="field"><span class="lbl">Account</span><b id="pick" style="font-size:16px">Pick one from the search</b></div>
+      <div class="row">
+        <div class="field"><span class="lbl">Label with</span><div class="seg-ctl" id="dmodel" role="group" aria-label="Model to label with">
+          <button type="button" id="dm-gpt" data-m="gpt" aria-pressed="true">GPT</button><button type="button" id="dm-jev" data-m="jev" aria-pressed="false">Jev</button><button type="button" id="dm-both" data-m="both" aria-pressed="false">Both</button></div></div>
+        <div class="field" style="flex:0 1 110px"><label class="lbl" for="dlimit">Reels</label><input id="dlimit" type="number" min="5" max="200" value="50"></div>
+      </div>
+      <div class="field"><label class="lbl" for="pass">Passcode</label><input id="pass" type="password" autocomplete="current-password" placeholder="Your DECODE_PASSCODE"></div>
+      <div><button class="btn" id="go" type="button" disabled>Decode</button></div>
+      <p class="msg" id="dmsg" role="status"></p>
+      <div><span class="lbl">Recent runs</span><div class="runs" id="runs"><span class="note">Loading…</span></div></div>
+    </div>
+  </section>
 
   <div id="app">
     <div class="wrap" style="padding:0">
@@ -185,9 +230,7 @@ const cls = m => m>=1.15 ? "up" : m<=0.85 ? "down" : "";
 const store = { get:k=>{try{return localStorage.getItem(k)}catch{return null}}, set:(k,v)=>{try{localStorage.setItem(k,v)}catch{}} };
 
 // Link to the Actions form of this repo (owner.github.io/repo/)
-const owner = location.hostname.endsWith("github.io") ? location.hostname.split(".")[0] : null;
-const repo = location.pathname.split("/").filter(Boolean)[0];
-$("new").href = owner && repo ? `https://github.com/${owner}/${repo}/actions/workflows/decode.yml` : "https://github.com";
+
 
 let INDEX = [], ACC = null, MODEL = null, REELS = [], live = [], base = 0, byHook = [], filter = null, selected = null;
 
@@ -231,9 +274,10 @@ function renderSugg(){
   const q = $("q").value.trim().toLowerCase().replace(/^@/,"");
   const hits = INDEX.filter(a=>!q || a.handle.includes(q) || (a.full_name||"").toLowerCase().includes(q)).slice(0,8);
   $("sugg").innerHTML = hits.length ? hits.map(a=>`<button data-h="${esc(a.handle)}"><span>@${esc(a.handle)} <span style="color:var(--muted)">${esc(a.full_name||"")}</span></span><small>${a.models.map(m=>MODELS[m]).join(" · ")}</small></button>`).join("")
-    : `<div class="note" style="padding:10px 12px">Not decoded yet. Use “Decode a new account” and type <b>${esc(q)}</b> there.</div>`;
+    : `<button id="sugg-ig" data-q="${esc(q)}"><span>Search Instagram for “${esc(q)}”</span><small>decode it</small></button>`;
   $("sugg").hidden = false;
-  $("sugg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ $("sugg").hidden=true; openAccount(INDEX.find(a=>a.handle===b.dataset.h)); });
+  $("sugg").querySelectorAll("button[data-h]").forEach(b=>b.onclick=()=>{ $("sugg").hidden=true; openAccount(INDEX.find(a=>a.handle===b.dataset.h)); });
+  const ig=$("sugg-ig"); if(ig) ig.onclick=()=>{ $("sugg").hidden=true; openDecoder(ig.dataset.q); };
 }
 $("q").addEventListener("input", renderSugg);
 $("q").addEventListener("focus", renderSugg);
@@ -333,6 +377,72 @@ function renderDetail(){
 
 function select(code){ selected=code; renderChart(); renderArchive(); renderDetail(); if(innerWidth<900) $("detail").scrollIntoView({behavior:"smooth",block:"start"}); }
 function renderAll(){ renderLegend(); renderChart(); renderArchive(); }
+// ---------- decoding new accounts (Vercel API routes) ----------
+let pick = null, dmodel = "gpt", pollTimer = null;
+$("pass").value = store.get("pass") || "";
+async function api(path, body){
+  const r = await fetch("api/"+path, body ? {method:"POST", headers:{"Content-Type":"application/json","x-passcode":$("pass").value.trim()}, body:JSON.stringify(body)} : {cache:"no-store"});
+  const j = await r.json().catch(()=>({error:`Server returned ${r.status}. Is this deployed on Vercel?`}));
+  if(!r.ok) throw new Error(j.error || `Error ${r.status}`);
+  return j;
+}
+function say(text, kind){ $("dmsg").textContent = text; $("dmsg").className = "msg" + (kind ? " "+kind : ""); }
+function openDecoder(q){
+  $("decoder").hidden = false; $("new").setAttribute("aria-expanded","true");
+  if(q){ $("igq").value = q; $("igform").requestSubmit(); } else $("igq").focus();
+  loadRuns(); clearInterval(pollTimer); pollTimer = setInterval(loadRuns, 15000);
+}
+$("new").onclick = ()=>{ if($("decoder").hidden) openDecoder(); else { $("decoder").hidden = true; $("new").setAttribute("aria-expanded","false"); clearInterval(pollTimer); } };
+$("pass").addEventListener("change", ()=>store.set("pass", $("pass").value.trim()));
+$("dmodel").querySelectorAll("button").forEach(b=>b.onclick=()=>{ dmodel=b.dataset.m; $("dmodel").querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed", x===b)); });
+
+$("igform").addEventListener("submit", async e=>{
+  e.preventDefault();
+  const q = $("igq").value.trim(); if(!q) return;
+  if(!$("pass").value.trim()){ say("Enter the passcode first. Searching costs Apify credit.", "err"); $("pass").focus(); return; }
+  store.set("pass", $("pass").value.trim());
+  $("igbtn").disabled = true; say("Searching Instagram… this takes 10–30 seconds.");
+  try {
+    const { users } = await api("search", { q });
+    $("users").innerHTML = users.length ? users.map(u=>`<button type="button" class="user" data-u="${esc(u.username)}" aria-pressed="false">
+      ${u.pic ? `<img src="${esc(u.pic)}" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph'}))">` : '<span class="ph"></span>'}
+      <span><b>@${esc(u.username)}</b>${u.verified?" ✓":""}<br><span style="color:var(--muted)">${esc(u.fullName)}</span></span>
+      <small>${u.followers!=null ? fmt(u.followers)+" followers" : ""}${INDEX.some(a=>a.handle===u.username) ? " · decoded" : ""}</small></button>`).join("")
+      : `<p class="note">No accounts found for “${esc(q)}”.</p>`;
+    $("users").querySelectorAll(".user").forEach(b=>b.onclick=()=>{
+      pick = b.dataset.u; $("pick").textContent = "@"+pick; $("go").disabled = false;
+      $("users").querySelectorAll(".user").forEach(x=>x.setAttribute("aria-pressed", x===b));
+    });
+    say(users.length ? "Pick the right account, then press Decode." : "");
+  } catch(err){ say(err.message, "err"); }
+  $("igbtn").disabled = false;
+});
+
+$("go").onclick = async ()=>{
+  if(!pick) return;
+  store.set("pass", $("pass").value.trim());
+  $("go").disabled = true;
+  try {
+    const r = await api("decode", { handle: pick, model: dmodel, limit: $("dlimit").value });
+    say(`Started decoding @${r.handle} with ${MODELS[r.model]||"GPT + Jev"} (${r.limit} reels). About 10–15 minutes; this list updates by itself.`, "ok");
+    setTimeout(loadRuns, 4000);
+  } catch(err){ say(err.message, "err"); }
+  $("go").disabled = false;
+};
+
+async function loadRuns(){
+  try {
+    const { runs } = await api("runs");
+    $("runs").innerHTML = runs.length ? runs.map(w=>{
+      const st = w.status!=="completed" ? ["running","var(--accent)"] : w.conclusion==="success" ? ["done","var(--good)"] : [w.conclusion||"failed","var(--bad)"];
+      return `<div class="run"><a href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}</a><span class="pill" style="color:${st[1]}">${esc(st[0])}</span></div>`; }).join("")
+      : '<span class="note">No runs yet.</span>';
+    const latest = runs[0];
+    if(latest && latest.status==="completed" && latest.conclusion==="success" && Date.now()-new Date(latest.updated) < 5*60e3)
+      $("runs").insertAdjacentHTML("beforeend", `<p class="note">The latest run finished. Vercel redeploys in about a minute, then <button class="btn" type="button" onclick="location.reload()" style="padding:4px 10px">reload</button></p>`);
+  } catch(err){ $("runs").innerHTML = `<span class="note">${esc(err.message)}</span>`; }
+}
+
 boot();
 </script>
 </body></html>

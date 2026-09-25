@@ -6,7 +6,8 @@
            Anything else (e.g. "nate herk") = Instagram search, top result by followers.
 --model    gpt | jev | both
 
-Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription), TYPESAFE_API_KEY (for jev).
+Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription),
+     AI_GATEWAY_API_KEY or TYPESAFE_API_KEY (for jev).
 Writes docs/data/<handle>/<model>.json, thumbs, a transcript cache, and docs/data/index.json.
 """
 import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile
@@ -20,8 +21,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "docs" / "data"
 GPT_MODEL = os.environ.get("GPT_MODEL") or "gpt-5-mini"
 TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL") or "gpt-4o-mini-transcribe"
-JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-latest"
-JEV_URL = "https://api.typesafe.ai/v1/systemone"
+# Jev runs through Vercel AI Gateway when AI_GATEWAY_API_KEY is set, else TypeSafe directly.
+if os.environ.get("AI_GATEWAY_API_KEY"):
+    JEV_URL, JEV_KEY_ENV = "https://ai-gateway.vercel.sh/typesafe/v1/systemone", "AI_GATEWAY_API_KEY"
+    JEV_MODEL = os.environ.get("JEV_MODEL") or "typesafe-ai/jev"
+else:
+    JEV_URL, JEV_KEY_ENV = "https://api.typesafe.ai/v1/systemone", "TYPESAFE_API_KEY"
+    JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-latest"
 MAX_SENTENCES = 40
 
 # The taxonomy. Keys are the labels; values are the definitions both models see.
@@ -225,8 +231,8 @@ def main():
     args = ap.parse_args()
 
     models = ["gpt", "jev"] if args.model == "both" else [args.model]
-    if "jev" in models and not os.environ.get("TYPESAFE_API_KEY"):
-        sys.exit("TYPESAFE_API_KEY is not set, so Jev can't run. Add it as a repo secret or pick gpt.")
+    if "jev" in models and not os.environ.get(JEV_KEY_ENV):
+        sys.exit("Jev needs AI_GATEWAY_API_KEY (Vercel) or TYPESAFE_API_KEY. Add one as a repo secret or pick gpt.")
     apify, oa = ApifyClient(os.environ["APIFY_TOKEN"]), OpenAI()
 
     handle = resolve_handle(args.account, apify)
@@ -256,7 +262,7 @@ def main():
             caption = r.get("caption") or ""
             try:
                 lab = label_gpt(sents, caption, oa) if model == "gpt" else \
-                      label_jev(sents, caption, os.environ["TYPESAFE_API_KEY"])
+                      label_jev(sents, caption, os.environ[JEV_KEY_ENV])
             except Exception as e:
                 print(f"  {model} failed on {code}: {e}")
                 failed += 1
