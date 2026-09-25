@@ -49,7 +49,7 @@ jobs:
           ACCOUNT: ${{ inputs.account }}
           MODEL: ${{ inputs.model }}
           LIMIT: ${{ inputs.limit }}
-        run: python pipeline/decode.py --account "$ACCOUNT" --model "$MODEL" --limit "$LIMIT"
+        run: python -u pipeline/decode.py --account "$ACCOUNT" --model "$MODEL" --limit "$LIMIT"
       - name: Commit results
         if: success() || failure()
         env:

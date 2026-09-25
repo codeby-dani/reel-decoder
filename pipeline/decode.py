@@ -10,7 +10,8 @@ Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription),
      AI_GATEWAY_API_KEY or TYPESAFE_API_KEY (for jev).
 Writes docs/data/<handle>/<model>.json, thumbs, a transcript cache, and docs/data/index.json.
 """
-import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile, time
+import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile, threading, time
+from concurrent.futures import ThreadPoolExecutor
 
 import openai
 import requests
@@ -23,6 +24,7 @@ DATA = ROOT / "docs" / "data"
 GPT_MODEL = os.environ.get("GPT_MODEL") or "gpt-5-mini"
 # Used when the OpenAI account can't access GPT_MODEL (e.g. gpt-5 models need a verified organization).
 GPT_FALLBACK = "gpt-4.1-mini"
+_fallback_lock = threading.Lock()
 TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL") or "gpt-4o-mini-transcribe"
 # Jev runs through Vercel AI Gateway when AI_GATEWAY_API_KEY is set, else TypeSafe directly.
 if os.environ.get("AI_GATEWAY_API_KEY"):
@@ -32,6 +34,7 @@ else:
     JEV_URL, JEV_KEY_ENV = "https://api.typesafe.ai/v1/systemone", "TYPESAFE_API_KEY"
     JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-latest"
 MAX_SENTENCES = 40
+WORKERS = 8  # reels transcribed / labelled at the same time
 
 # The taxonomy. Keys are the labels; values are the definitions both models see.
 HOOKS = {
@@ -157,6 +160,10 @@ def transcribe(video_url: str, oa: OpenAI) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         mp4, mp3 = pathlib.Path(tmp, "v.mp4"), pathlib.Path(tmp, "a.mp3")
         mp4.write_bytes(requests.get(video_url, timeout=120).content)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                                "stream=index", "-of", "csv=p=0", str(mp4)], capture_output=True, text=True)
+        if not probe.stdout.strip():
+            return ""  # the reel has no audio track, so there is nothing to transcribe
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(mp4), "-vn",
                         "-ac", "1", "-ar", "16000", "-b:a", "48k", str(mp3)], check=True)
         with open(mp3, "rb") as f:
@@ -187,6 +194,7 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
                        for name, d in [("hook", HOOKS), ("topic", TOPICS), ("format", FORMATS),
                                        ("ask", ASKS), ("roles", ROLES)])
     global GPT_MODEL
+    model = GPT_MODEL
     request = dict(
         messages=[{"role": "system", "content":
                    "You label short-form video scripts. Classify the hook by the FIRST sentence only. "
@@ -195,14 +203,16 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
         response_format={"type": "json_schema",
                          "json_schema": {"name": "labels", "strict": True, "schema": schema}})
     try:
-        res = oa.chat.completions.create(model=GPT_MODEL, **request)
+        res = oa.chat.completions.create(model=model, **request)
     except openai.NotFoundError as e:
-        if GPT_MODEL == GPT_FALLBACK:
+        if model == GPT_FALLBACK:
             raise
-        summary(f"⚠️ `{GPT_MODEL}` isn't available on this OpenAI account ({e.message[:160]}). "
-                f"Using `{GPT_FALLBACK}` instead.")
-        GPT_MODEL = GPT_FALLBACK
-        res = oa.chat.completions.create(model=GPT_MODEL, **request)
+        with _fallback_lock:
+            if GPT_MODEL != GPT_FALLBACK:
+                summary(f"⚠️ `{GPT_MODEL}` isn't available on this OpenAI account ({e.message[:160]}). "
+                        f"Using `{GPT_FALLBACK}` instead.")
+                GPT_MODEL = GPT_FALLBACK
+        res = oa.chat.completions.create(model=GPT_FALLBACK, **request)
     out = json.loads(res.choices[0].message.content)
     roles = (out["roles"] + ["payoff"] * len(sents))[:len(sents)]
     return {**out, "roles": roles, "tokens": res.usage.total_tokens if res.usage else 0}
@@ -276,32 +286,50 @@ def main():
     cache_path = folder / "transcripts.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
 
-    for i, r in enumerate(reels, 1):
+    todo = [r for r in reels if r["shortCode"] not in cache]
+    print(f"Transcribing {len(todo)} reels ({len(reels) - len(todo)} cached), {WORKERS} at a time...")
+    t0 = time.time()
+
+    def fetch(r):
         code = r["shortCode"]
         save_thumb(r.get("displayUrl"), folder / "thumbs" / f"{code}.jpg")
-        if code not in cache:
-            try:
-                cache[code] = transcribe(r["videoUrl"], oa)
-            except Exception as e:
-                print(f"  transcribe failed for {code}: {e}")  # not cached, so the next run retries
-        print(f"[{i}/{len(reels)}] transcribed {code}")
+        if code in cache:
+            return
+        try:
+            cache[code] = transcribe(r["videoUrl"], oa)
+        except Exception as e:
+            print(f"  transcribe failed for {code}: {str(e)[:200]}")  # not cached, so the next run retries
+
+    with ThreadPoolExecutor(WORKERS) as pool:
+        for i, _ in enumerate(pool.map(fetch, reels), 1):
+            if i % 10 == 0 or i == len(reels):
+                print(f"  {i}/{len(reels)} done")
+    summary(f"Transcribed {len(todo)} reels in {time.time() - t0:.0f}s.")
     folder.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache, indent=1, ensure_ascii=False))
 
     broken = []
     for model in models:
         out, tokens, failed, first_error = [], 0, 0, None
-        for r in reels:
-            code = r["shortCode"]
-            sents = sentences(cache.get(code, ""))
+        t0 = time.time()
+
+        def label(r):
+            sents = sentences(cache.get(r["shortCode"], ""))
             caption = r.get("caption") or ""
             try:
-                lab = label_gpt(sents, caption, oa) if model == "gpt" else \
-                      label_jev(sents, caption, os.environ[JEV_KEY_ENV])
+                return r, sents, (label_gpt(sents, caption, oa) if model == "gpt" else
+                                  label_jev(sents, caption, os.environ[JEV_KEY_ENV])), None
             except Exception as e:
-                print(f"  {model} failed on {code}: {e}")
+                return r, sents, None, e
+
+        with ThreadPoolExecutor(WORKERS) as pool:
+            results = list(pool.map(label, reels))
+        for r, sents, lab, err in results:
+            code, caption = r["shortCode"], r.get("caption") or ""
+            if err:
+                print(f"  {model} failed on {code}: {err}")
                 failed += 1
-                first_error = first_error or str(e)
+                first_error = first_error or str(err)
                 continue
             tokens += lab.get("tokens", 0)
             words = sum(len(s.split()) for s in sents)
@@ -327,7 +355,8 @@ def main():
             "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "reels": out}, ensure_ascii=False))
         update_index(handle, full_name, model, len(out))
-        summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} ({failed} failed, {tokens:,} tokens).")
+        summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} in {time.time() - t0:.0f}s "
+                f"({failed} failed, {tokens:,} tokens).")
     if broken:
         sys.exit(f"Labelling failed completely for: {', '.join(broken)}. See the errors above.")
 
