@@ -10,7 +10,7 @@ Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription),
      AI_GATEWAY_API_KEY or TYPESAFE_API_KEY (for jev).
 Writes docs/data/<handle>/<model>.json, thumbs, a transcript cache, and docs/data/index.json.
 """
-import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile
+import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile, time
 
 import openai
 import requests
@@ -220,8 +220,12 @@ def label_jev(sents, caption, key: str) -> dict:
     for i in range(len(sents)):
         q[f"s{i}"] = {"type": "choice", "criteria": ROLES,
                       "instructions": f"What role does sentence [{i}] play in the script?"}
-    r = requests.post(JEV_URL, timeout=60, headers={"Authorization": f"Bearer {key}"},
-                      json={"state": script_block(sents, caption), "model": JEV_MODEL, "questions": q})
+    body = {"state": script_block(sents, caption), "model": JEV_MODEL, "questions": q}
+    for attempt in range(5):  # Jev returns 429/503 under load; back off 2, 4, 8, 16s
+        r = requests.post(JEV_URL, timeout=60, headers={"Authorization": f"Bearer {key}"}, json=body)
+        if r.status_code not in (429, 500, 502, 503, 504):
+            break
+        time.sleep(2 ** (attempt + 1))
     if r.status_code != 200:
         raise RuntimeError(f"{r.status_code} from {JEV_URL}: {r.text[:300]}")
     a = r.json()["answers"]
