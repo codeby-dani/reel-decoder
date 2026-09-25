@@ -12,6 +12,7 @@ Writes docs/data/<handle>/<model>.json, thumbs, a transcript cache, and docs/dat
 """
 import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile
 
+import openai
 import requests
 from apify_client import ApifyClient
 from openai import OpenAI
@@ -20,6 +21,8 @@ from PIL import Image
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "docs" / "data"
 GPT_MODEL = os.environ.get("GPT_MODEL") or "gpt-5-mini"
+# Used when the OpenAI account can't access GPT_MODEL (e.g. gpt-5 models need a verified organization).
+GPT_FALLBACK = "gpt-4.1-mini"
 TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL") or "gpt-4o-mini-transcribe"
 # Jev runs through Vercel AI Gateway when AI_GATEWAY_API_KEY is set, else TypeSafe directly.
 if os.environ.get("AI_GATEWAY_API_KEY"):
@@ -183,14 +186,23 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
     defs = "\n\n".join(f"{name}:\n" + "\n".join(f"- {k}: {v}" for k, v in d.items())
                        for name, d in [("hook", HOOKS), ("topic", TOPICS), ("format", FORMATS),
                                        ("ask", ASKS), ("roles", ROLES)])
-    res = oa.chat.completions.create(
-        model=GPT_MODEL,
+    global GPT_MODEL
+    request = dict(
         messages=[{"role": "system", "content":
                    "You label short-form video scripts. Classify the hook by the FIRST sentence only. "
                    f"Return one role per numbered sentence, in order ({len(sents)} roles).\n\n{defs}"},
                   {"role": "user", "content": script_block(sents, caption)}],
         response_format={"type": "json_schema",
                          "json_schema": {"name": "labels", "strict": True, "schema": schema}})
+    try:
+        res = oa.chat.completions.create(model=GPT_MODEL, **request)
+    except openai.NotFoundError as e:
+        if GPT_MODEL == GPT_FALLBACK:
+            raise
+        summary(f"⚠️ `{GPT_MODEL}` isn't available on this OpenAI account ({e.message[:160]}). "
+                f"Using `{GPT_FALLBACK}` instead.")
+        GPT_MODEL = GPT_FALLBACK
+        res = oa.chat.completions.create(model=GPT_MODEL, **request)
     out = json.loads(res.choices[0].message.content)
     roles = (out["roles"] + ["payoff"] * len(sents))[:len(sents)]
     return {**out, "roles": roles, "tokens": res.usage.total_tokens if res.usage else 0}
@@ -210,7 +222,8 @@ def label_jev(sents, caption, key: str) -> dict:
                       "instructions": f"What role does sentence [{i}] play in the script?"}
     r = requests.post(JEV_URL, timeout=60, headers={"Authorization": f"Bearer {key}"},
                       json={"state": script_block(sents, caption), "model": JEV_MODEL, "questions": q})
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"{r.status_code} from {JEV_URL}: {r.text[:300]}")
     a = r.json()["answers"]
     return {"hook": a["hook"]["choice"], "topic": a["topic"]["choice"],
             "format": a["format"]["choice"], "ask": a["ask"]["choice"],
@@ -266,14 +279,14 @@ def main():
             try:
                 cache[code] = transcribe(r["videoUrl"], oa)
             except Exception as e:
-                print(f"  transcribe failed for {code}: {e}")
-                cache[code] = ""
+                print(f"  transcribe failed for {code}: {e}")  # not cached, so the next run retries
         print(f"[{i}/{len(reels)}] transcribed {code}")
     folder.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache, indent=1, ensure_ascii=False))
 
+    broken = []
     for model in models:
-        out, tokens, failed = [], 0, 0
+        out, tokens, failed, first_error = [], 0, 0, None
         for r in reels:
             code = r["shortCode"]
             sents = sentences(cache.get(code, ""))
@@ -284,6 +297,7 @@ def main():
             except Exception as e:
                 print(f"  {model} failed on {code}: {e}")
                 failed += 1
+                first_error = first_error or str(e)
                 continue
             tokens += lab.get("tokens", 0)
             words = sum(len(s.split()) for s in sents)
@@ -298,6 +312,10 @@ def main():
                 "thumb": f"data/{handle}/thumbs/{code}.jpg",
                 "segs": [[role, s] for role, s in zip(lab["roles"], sents)],
             })
+        if not out:
+            summary(f"❌ **{model}** labelled nothing for @{handle}. First error:\n\n```\n{first_error}\n```")
+            broken.append(model)
+            continue
         full_name = reels[0].get("ownerFullName") or handle
         (folder / f"{model}.json").write_text(json.dumps({
             "handle": handle, "full_name": full_name, "model": model,
@@ -305,7 +323,9 @@ def main():
             "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "reels": out}, ensure_ascii=False))
         update_index(handle, full_name, model, len(out))
-        summary(f"**{model}** labelled {len(out)} reels of @{handle} ({failed} failed, {tokens:,} tokens).")
+        summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} ({failed} failed, {tokens:,} tokens).")
+    if broken:
+        sys.exit(f"Labelling failed completely for: {', '.join(broken)}. See the errors above.")
 
 
 if __name__ == "__main__":

@@ -235,7 +235,7 @@ const store = { get:k=>{try{return localStorage.getItem(k)}catch{return null}}, 
 let INDEX = [], ACC = null, MODEL = null, REELS = [], live = [], base = 0, byHook = [], filter = null, selected = null;
 
 async function boot(){
-  try { INDEX = (await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts || []; } catch { INDEX = []; }
+  try { INDEX = ((await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts || []).filter(a=>a.reels>0 && a.models?.length); } catch { INDEX = []; }
   if(!INDEX.length){ $("app").innerHTML = `<div class="panel empty">No accounts decoded yet. Use “Decode a new account” to run the first one.</div>`; return; }
   const want = (location.hash.slice(1) || store.get("acc") || "").toLowerCase();
   await openAccount(INDEX.find(a=>a.handle===want) || INDEX[0]);
@@ -250,6 +250,7 @@ async function openAccount(acc, model){
   renderModels();
   const d = await (await fetch(`data/${acc.handle}/${MODEL}.json`,{cache:"no-store"})).json();
   REELS = d.reels.filter(r=>r.plays>0);
+  if(!REELS.length){ $("handle").textContent = "@"+acc.handle; $("sub").textContent = "This decode has no reels with play counts yet. Run it again from “Decode a new account”."; return; }
   live = REELS.filter(r=>!r.pinned); if(!live.length) live = REELS;
   base = med(live.map(r=>r.plays));
   byHook = HOOKS.map(h=>{ const rs=live.filter(r=>r.hook===h); return {h, rs, med:med(rs.map(r=>r.plays)), cpk:med(rs.map(r=>r.comments/r.plays*1000))}; }).filter(x=>x.rs.length);
