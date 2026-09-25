@@ -380,9 +380,10 @@ function renderAll(){ renderLegend(); renderChart(); renderArchive(); }
 // ---------- decoding new accounts (Vercel API routes) ----------
 let pick = null, dmodel = "gpt", pollTimer = null;
 $("pass").value = store.get("pass") || "";
-async function api(path, body){
-  const r = await fetch("api/"+path, body ? {method:"POST", headers:{"Content-Type":"application/json","x-passcode":$("pass").value.trim()}, body:JSON.stringify(body)} : {cache:"no-store"});
-  const j = await r.json().catch(()=>({error:`Server returned ${r.status}. Is this deployed on Vercel?`}));
+async function api(path, body, auth){
+  const headers = {"x-passcode": $("pass").value.trim()};
+  const r = await fetch("api/"+path, body ? {method:"POST", headers:{...headers, "Content-Type":"application/json"}, body:JSON.stringify(body)} : {cache:"no-store", headers: auth ? headers : {}});
+  const j = await r.json().catch(()=>({error: r.status===504 ? "The server timed out. Try again." : `Server returned ${r.status}.`}));
   if(!r.ok) throw new Error(j.error || `Error ${r.status}`);
   return j;
 }
@@ -396,25 +397,43 @@ $("new").onclick = ()=>{ if($("decoder").hidden) openDecoder(); else { $("decode
 $("pass").addEventListener("change", ()=>store.set("pass", $("pass").value.trim()));
 $("dmodel").querySelectorAll("button").forEach(b=>b.onclick=()=>{ dmodel=b.dataset.m; $("dmodel").querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed", x===b)); });
 
+function showUsers(users, q, pending){
+  $("users").innerHTML = users.map(u=>`<button type="button" class="user" data-u="${esc(u.username)}" aria-pressed="${pick===u.username}">
+    ${u.pic ? `<img src="${esc(u.pic)}" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph'}))">` : '<span class="ph"></span>'}
+    <span><b>@${esc(u.username)}</b>${u.verified?" ✓":""}${u.private?' <span class="lbl">private</span>':""}<br><span style="color:var(--muted)">${esc(u.fullName)}</span></span>
+    <small>${u.followers!=null ? fmt(u.followers)+" followers" : ""}${INDEX.some(a=>a.handle===u.username) ? " · decoded" : ""}</small></button>`).join("")
+    + (pending ? '<p class="note">Looking for more matches…</p>' : "");
+  $("users").querySelectorAll(".user").forEach(b=>b.onclick=()=>{
+    pick = b.dataset.u; $("pick").textContent = "@"+pick; $("go").disabled = false;
+    $("users").querySelectorAll(".user").forEach(x=>x.setAttribute("aria-pressed", x===b));
+  });
+}
+
 $("igform").addEventListener("submit", async e=>{
   e.preventDefault();
   const q = $("igq").value.trim(); if(!q) return;
   if(!$("pass").value.trim()){ say("Enter the passcode first. Searching costs Apify credit.", "err"); $("pass").focus(); return; }
   store.set("pass", $("pass").value.trim());
-  $("igbtn").disabled = true; say("Searching Instagram… this takes 10–30 seconds.");
+  $("igbtn").disabled = true; $("users").innerHTML = "";
+  const handleLike = q.replace(/^@/,"").toLowerCase();
+  const exact = /^[a-z0-9._]{1,30}$/.test(handleLike) ? [{username:handleLike, fullName:"Use this exact handle", followers:null, verified:false, pic:"", exact:true}] : [];
+  showUsers(exact, q, true);
+  const t0 = Date.now(), tick = setInterval(()=>say(`Searching Instagram… ${Math.round((Date.now()-t0)/1000)}s (usually about a minute)`), 1000);
   try {
-    const { users } = await api("search", { q });
-    $("users").innerHTML = users.length ? users.map(u=>`<button type="button" class="user" data-u="${esc(u.username)}" aria-pressed="false">
-      ${u.pic ? `<img src="${esc(u.pic)}" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph'}))">` : '<span class="ph"></span>'}
-      <span><b>@${esc(u.username)}</b>${u.verified?" ✓":""}<br><span style="color:var(--muted)">${esc(u.fullName)}</span></span>
-      <small>${u.followers!=null ? fmt(u.followers)+" followers" : ""}${INDEX.some(a=>a.handle===u.username) ? " · decoded" : ""}</small></button>`).join("")
-      : `<p class="note">No accounts found for “${esc(q)}”.</p>`;
-    $("users").querySelectorAll(".user").forEach(b=>b.onclick=()=>{
-      pick = b.dataset.u; $("pick").textContent = "@"+pick; $("go").disabled = false;
-      $("users").querySelectorAll(".user").forEach(x=>x.setAttribute("aria-pressed", x===b));
-    });
-    say(users.length ? "Pick the right account, then press Decode." : "");
-  } catch(err){ say(err.message, "err"); }
+    const { runId } = await api("search", { q });
+    let res;
+    while(true){
+      await new Promise(r=>setTimeout(r, 3000));
+      res = await api(`search?run=${encodeURIComponent(runId)}&q=${encodeURIComponent(q)}`, null, true);
+      if(res.status === "done") break;
+      if(Date.now()-t0 > 180000) throw new Error("Search took over 3 minutes. Try again, or type the exact @handle.");
+    }
+    clearInterval(tick);
+    const found = res.users.filter(u=>u.username!==handleLike || !exact.length);
+    if(exact.length){ const hit = res.users.find(u=>u.username===handleLike); if(hit) exact[0] = {...hit, exact:true}; }
+    showUsers([...exact, ...found], q, false);
+    say(exact.length+found.length ? "Pick the right account, then press Decode." : `No accounts found for “${q}”.`);
+  } catch(err){ clearInterval(tick); say(err.message, "err"); }
   $("igbtn").disabled = false;
 });
 

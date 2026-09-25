@@ -86,6 +86,25 @@ ROLES = {
 
 # ---------- account + scraping ----------
 
+def run_items(apify: ApifyClient, run) -> list[dict]:
+    """Dataset items of a finished actor run. apify-client 3 returns a Run model, older versions a dict."""
+    if run is None:
+        sys.exit("The Apify run didn't return. Check APIFY_TOKEN and your Apify credit.")
+    ds = run["defaultDatasetId"] if isinstance(run, dict) else run.default_dataset_id
+    return list(apify.dataset(ds).iterate_items())
+
+
+def rank_users(users: list[dict], query: str) -> list[dict]:
+    """Apify mixes in unrelated big accounts, so rank by name match first, then verified, then followers."""
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", str(x or "").lower())
+    tokens = [norm(t) for t in re.split(r"[\s@._-]+", query.lower()) if norm(t)]
+    def score(u):
+        hay = norm(u.get("username")) + " " + norm(u.get("fullName"))
+        return sum(t in hay for t in tokens) / (len(tokens) or 1)
+    users = [u for u in users if u.get("username") and score(u) > 0]
+    return sorted(users, key=lambda u: (score(u), bool(u.get("verified")), u.get("followersCount") or 0), reverse=True)
+
+
 def resolve_handle(account: str, apify: ApifyClient) -> str:
     account = account.strip()
     m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", account)
@@ -96,14 +115,13 @@ def resolve_handle(account: str, apify: ApifyClient) -> str:
     print(f"Searching Instagram for '{account}'...")
     run = apify.actor("apify/instagram-search-scraper").call(
         run_input={"search": account, "searchType": "user", "searchLimit": 5})
-    users = list(apify.dataset(run["defaultDatasetId"]).iterate_items())
-    users = [u for u in users if u.get("username")]
+    users = run_items(apify, run)
+    users = rank_users(users, account)
     if not users:
-        sys.exit(f"No Instagram account found for '{account}'. Try '@handle' or a profile link.")
-    users.sort(key=lambda u: u.get("followersCount") or 0, reverse=True)
+        sys.exit(f"No Instagram account matching '{account}'. Try '@handle' or a profile link.")
     summary("### Search results for `%s`\n" % account + "\n".join(
         f"- @{u['username']} · {u.get('fullName', '')} · {u.get('followersCount', '?')} followers"
-        for u in users) + f"\n\nPicked **@{users[0]['username']}**.\n")
+        for u in users[:5]) + f"\n\nPicked **@{users[0]['username']}**.\n")
     return users[0]["username"].lower()
 
 
@@ -111,7 +129,7 @@ def scrape_reels(handle: str, limit: int, apify: ApifyClient) -> list[dict]:
     print(f"Scraping {limit} reels from @{handle}...")
     run = apify.actor("apify/instagram-reel-scraper").call(
         run_input={"username": [handle], "resultsLimit": limit})
-    items = list(apify.dataset(run["defaultDatasetId"]).iterate_items())
+    items = run_items(apify, run)
     reels = [i for i in items if i.get("shortCode") and i.get("videoUrl")]
     if not reels:
         sys.exit(f"@{handle} returned no reels (private account, wrong handle, or no reels).")
