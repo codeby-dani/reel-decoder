@@ -1,6 +1,15 @@
 {
  "accounts": [
   {
+   "handle": "liamottley",
+   "models": [
+    "gpt"
+   ],
+   "full_name": "Liam Ottley",
+   "reels": 5,
+   "updated": "2026-09-25"
+  },
+  {
    "handle": "nateherkai",
    "models": [
     "claude"
