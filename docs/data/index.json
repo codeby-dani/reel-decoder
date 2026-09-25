@@ -1,6 +1,15 @@
 {
  "accounts": [
   {
+   "handle": "eldiadesera",
+   "models": [
+    "jev"
+   ],
+   "full_name": "Ms Alena | travel•blog•lifestyle",
+   "reels": 49,
+   "updated": "2026-09-25"
+  },
+  {
    "handle": "liamottley",
    "models": [
     "gpt",
