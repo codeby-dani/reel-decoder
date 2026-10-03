@@ -3,7 +3,10 @@
 const APIFY = "https://api.apify.com/v2";
 let storeId = null; // reused while the function instance stays warm
 
+const authorized = require("./_auth");
+
 module.exports = async (req, res) => {
+  if (!authorized(req, res)) return; // run titles and progress name the account being decoded
   res.setHeader("Cache-Control", "no-store");
   const run = String(req.query.run || "");
   if (!/^\d{5,20}$/.test(run)) return res.status(400).json({ error: "Missing run id." });

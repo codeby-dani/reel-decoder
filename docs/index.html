@@ -252,9 +252,17 @@ const store = { get:k=>{try{return localStorage.getItem(k)}catch{return null}}, 
 
 let INDEX = [], ACC = null, MODEL = null, REELS = [], live = [], base = 0, byHook = [], filter = null, selected = null;
 
+// Public example accounts live in data/. Everything else is private and only loads with the passcode.
+async function loadIndex(){
+  let pub = [], priv = [];
+  try { pub = (await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts || []; } catch {}
+  if($("pass").value.trim()){ try { priv = ((await api("data?path=index.json")).accounts || []).map(a=>({...a, priv:true})); } catch {} }
+  INDEX = [...priv, ...pub.filter(a=>!priv.some(x=>x.handle===a.handle))].filter(a=>a.reels>0 && a.models?.length).sort((a,b)=>a.handle.localeCompare(b.handle));
+}
+
 async function boot(){
-  try { INDEX = ((await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts || []).filter(a=>a.reels>0 && a.models?.length); } catch { INDEX = []; }
-  if(!INDEX.length){ $("app").innerHTML = `<div class="panel empty">No accounts decoded yet. Use “Decode a new account” to run the first one.</div>`; return; }
+  await loadIndex();
+  if(!INDEX.length){ $("app").innerHTML = `<div class="panel empty">No accounts to show yet.</div>`; return; }
   const want = (location.hash.slice(1) || store.get("acc") || "").toLowerCase();
   await openAccount(INDEX.find(a=>a.handle===want) || INDEX[0]);
 }
@@ -266,7 +274,7 @@ async function openAccount(acc, model){
   store.set("acc", acc.handle); store.set("model", MODEL);
   history.replaceState(null, "", "#"+acc.handle.replace(/[^A-Za-z0-9._~-]/g,""));
   renderModels();
-  const d = await (await fetch(`data/${acc.handle}/${MODEL}.json`,{cache:"no-store"})).json();
+  const d = acc.priv ? await api(`data?path=${acc.handle}/${MODEL}.json`) : await (await fetch(`data/${acc.handle}/${MODEL}.json`,{cache:"no-store"})).json();
   REELS = d.reels.filter(r=>r.plays>0);
   if(!REELS.length){ $("handle").textContent = "@"+acc.handle; $("sub").textContent = "This decode has no reels with play counts yet. Run it again from “Decode a new account”."; return; }
   live = REELS.filter(r=>!r.pinned); if(!live.length) live = REELS;
@@ -276,7 +284,7 @@ async function openAccount(acc, model){
   $("handle").textContent = "@"+acc.handle;
   $("q").value = "";
   const dates = live.map(r=>new Date(r.timestamp)).sort((a,b)=>a-b);
-  $("sub").textContent = `${d.full_name} · ${REELS.length} recent reels, labelled by ${MODELS[MODEL]} (${d.model_id||MODEL}). Posted ${dfmt(dates[0])} – ${dfmt(dates.at(-1))}. Scraped ${d.generated.slice(0,10)}.`;
+  $("sub").textContent = `${d.full_name} · ${REELS.length} recent reels, labelled by ${MODELS[MODEL]} (${d.model_id||MODEL}). Posted ${dfmt(dates[0])} – ${dfmt(dates.at(-1))}. Scraped ${d.generated.slice(0,10)}.` + (d.stats ? ` Labelling took ${d.stats.wall_s}s, median ${d.stats.median_ms} ms per reel` + (d.stats.cost_usd!=null ? `, $${d.stats.cost_usd.toFixed(4)}` : "") + (d.stats.failed ? `, ${d.stats.failed} failed` : "") + "." : "");
   document.title = `Decode @${acc.handle}`;
   renderKpis(dates); renderFindings(); renderAll(); renderHooks(); renderTopics(); renderDetail();
   $("foot").innerHTML = `Plays are Instagram's public count at scrape time, so the newest reels are still climbing. ${live.length} reels is a small sample: treat gaps under ~1.3× as noise, and rows marked “small sample” as anecdotes.`;
@@ -371,17 +379,28 @@ function renderTopics(){
 function renderArchive(){
   const rs=[...REELS].sort((a,b)=>b.plays-a.plays);
   $("arch-count").textContent = `${REELS.length} reels · sorted by plays`;
-  $("archive").innerHTML = rs.map(r=>`<button class="cell${selected===r.shortCode?' sel':''}${filter&&r.hook!==filter?' dim':''}" data-c="${r.shortCode}" aria-label="${esc(r.hook_line)}"><img src="${esc(r.thumb)}" alt="" loading="lazy"><span class="pl">${fmt(r.plays)}</span><span class="tag" style="background:${HC[r.hook]||'var(--h8)'}"></span></button>`).join("");
+  $("archive").innerHTML = rs.map(r=>`<button class="cell${selected===r.shortCode?' sel':''}${filter&&r.hook!==filter?' dim':''}" data-c="${r.shortCode}" aria-label="${esc(r.hook_line)}"><img ${tsrc(r)} alt="" loading="lazy"><span class="pl">${fmt(r.plays)}</span><span class="tag" style="background:${HC[r.hook]||'var(--h8)'}"></span></button>`).join("");
   $("archive").querySelectorAll(".cell").forEach(c=>c.onclick=()=>select(c.dataset.c));
+  hydrate($("archive"));
 }
 
+// Thumbnails of private accounts need the passcode header, so they load as blobs instead of plain <img src>.
+const THUMBS = new Map();
+function tsrc(r){ return !ACC?.priv ? `src="${esc(r.thumb)}"` : (THUMBS.has(r.thumb) ? `src="${THUMBS.get(r.thumb)}" ` : "") + `data-t="${esc(r.thumb)}"`; }
+async function hydrate(root){
+  const imgs = [...root.querySelectorAll("img[data-t]:not([src])")]; let k = 0;
+  const work = async ()=>{ while(k < imgs.length){ const img = imgs[k++], t = img.dataset.t; try {
+    if(!THUMBS.has(t)){ const r = await fetch("api/data?path="+encodeURIComponent(t.replace(/^data\//,"")), {headers:{"x-passcode":$("pass").value.trim()}}); if(!r.ok) continue; THUMBS.set(t, URL.createObjectURL(await r.blob())); }
+    img.src = THUMBS.get(t); } catch {} } };
+  await Promise.all(Array.from({length:6}, work));
+}
 const SEGC={hook:"var(--s-hook)",setup:"var(--s-setup)",payoff:"var(--s-payoff)",pitch:"var(--s-pitch)"};
 function renderDetail(){
   const r=REELS.find(x=>x.shortCode===selected); if(!r){ $("detail").innerHTML=""; return; }
   const mult=r.plays/base;
   $("detail").innerHTML = `
     <div class="panel-head" style="margin:0"><h2>Inside the reel</h2><span class="lbl">${new Date(r.timestamp).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}${r.pinned?" · pinned":""}</span></div>
-    <div class="d-top"><img src="${esc(r.thumb)}" alt="">
+    <div class="d-top"><img ${tsrc(r)} alt="">
       <div class="labels">
         <div style="border-color:${HC[r.hook]||'var(--h8)'}"><span class="lbl">Hook${r.confidence!=null?` · ${Math.round(r.confidence*100)}% sure`:""}</span><b>${esc(r.hook)}</b></div>
         <div><span class="lbl">Topic</span><b>${esc(r.topic)}</b></div>
@@ -392,6 +411,7 @@ function renderDetail(){
     <div class="seg-legend">${Object.entries(SEGC).map(([k,c])=>`<span style="color:${c}">■ ${k}</span>`).join("")}</div>
     <div class="script">${r.segs.length ? r.segs.map(([t,s])=>`<div class="seg"><em style="color:${SEGC[t]}">${t}</em><p style="border-color:${SEGC[t]}">${esc(s)}</p></div>`).join("") : '<p class="note">No speech in this reel.</p>'}</div>
     <a href="https://www.instagram.com/reel/${r.shortCode}/" target="_blank" rel="noopener">Open on Instagram ↗</a>`;
+  hydrate($("detail"));
 }
 
 function select(code){ selected=code; renderChart(); renderArchive(); renderDetail(); if(innerWidth<900) $("detail").scrollIntoView({behavior:"smooth",block:"start"}); }
@@ -401,7 +421,7 @@ let pick = null, dmodel = "gpt", pollTimer = null;
 $("pass").value = store.get("pass") || "";
 async function api(path, body, auth){
   const headers = {"x-passcode": $("pass").value.trim()};
-  const r = await fetch("api/"+path, body ? {method:"POST", headers:{...headers, "Content-Type":"application/json"}, body:JSON.stringify(body)} : {cache:"no-store", headers: auth ? headers : {}});
+  const r = await fetch("api/"+path, body ? {method:"POST", headers:{...headers, "Content-Type":"application/json"}, body:JSON.stringify(body)} : {cache:"no-store", headers});
   const j = await r.json().catch(()=>({error: r.status===504 ? "The server timed out. Try again." : `Server returned ${r.status}.`}));
   if(!r.ok) throw new Error(j.error || `Error ${r.status}`);
   return j;
@@ -413,7 +433,7 @@ function openDecoder(q){
   loadRuns(); clearInterval(pollTimer); pollTimer = setInterval(loadRuns, 15000);
 }
 $("new").onclick = ()=>{ if($("decoder").hidden) openDecoder(); else { $("decoder").hidden = true; $("new").setAttribute("aria-expanded","false"); clearInterval(pollTimer); } };
-$("pass").addEventListener("change", ()=>store.set("pass", $("pass").value.trim()));
+$("pass").addEventListener("change", async ()=>{ store.set("pass", $("pass").value.trim()); await loadIndex(); });
 $("dmodel").querySelectorAll("button").forEach(b=>b.onclick=()=>{ dmodel=b.dataset.m; $("dmodel").querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed", x===b)); });
 
 function showUsers(users, q, pending){
@@ -519,12 +539,12 @@ async function poll(){
       text: p.error ? `Failed: ${p.error}` : `The run ${d.conclusion || "failed"}.` });
   }
   if(d.status === "completed"){
-    // GitHub is done; wait until Vercel serves the new data
+    // GitHub is done; wait until the private data repo serves the new file
     const ready = handle && (await Promise.all(models.map(async m=>{
-      try { const j = await (await fetch(`data/${handle}/${m}.json?t=${Date.now()}`, {cache:"no-store"})).json(); return new Date(j.generated).getTime() >= job.started - 60000; } catch { return false; }
+      try { const j = await api(`data?path=${handle}/${m}.json`); return new Date(j.generated).getTime() >= job.started - 60000; } catch { return false; }
     }))).every(Boolean);
     if(ready){ store.set("job", ""); return show({ ...base, stageKey:"done", ok:true, pct:100, text:"Done. The dashboard is live.", handle }); }
-    show({ ...base, stageKey:"publish", pct:95, text:"Publishing to the dashboard (Vercel redeploy)…" });
+    show({ ...base, stageKey:"publish", pct:95, text:"Saving to your private data…" });
     jobTimer = setTimeout(poll, 4000); return;
   }
   if(d.status === "queued") show({ ...base, stageKey:"queue", pct:3, text:"Waiting for a GitHub runner…" });
@@ -545,7 +565,7 @@ async function poll(){
 // Rough remaining time from typical stage durations (seconds), for the "about N left" hint.
 function eta(v){
   const per = { gpt:0.5, jev:0.8 }, n = v.limit || 50, m = v.models || ["gpt"];
-  const plan = { queue:15, setup:25, scrape:45, transcribe:0.7*n, label:m.reduce((a,x)=>a+(per[x]||0.6)*n,0), save:3, publish:45 };
+  const plan = { queue:15, setup:25, scrape:45, transcribe:0.7*n, label:m.reduce((a,x)=>a+(per[x]||0.6)*n,0), save:3, publish:5 };
   const order = STEPS.map(s=>s[0]), i = order.indexOf(v.stageKey);
   if(i < 0) return null;
   let left = order.slice(i+1).reduce((a,k)=>a+plan[k],0);
@@ -570,7 +590,7 @@ function show(v){
   $("job-actions").innerHTML = v.ok ? `<button class="btn" type="button" id="job-open">Open @${esc(v.handle)}</button>`
     : v.err && v.url ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">See the log on GitHub ↗</a>` : "";
   if(v.ok) $("job-open").onclick = async ()=>{
-    INDEX = ((await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts||[]).filter(a=>a.reels>0);
+    await loadIndex();
     const acc = INDEX.find(a=>a.handle===v.handle); if(acc) openAccount(acc, v.models[0]);
     $("job").hidden = true; window.scrollTo({top:0, behavior:"smooth"});
   };

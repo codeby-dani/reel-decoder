@@ -1,43 +1,6 @@
 {
  "accounts": [
   {
-   "handle": "eldiadesera",
-   "models": [
-    "jev"
-   ],
-   "full_name": "Ms Alena | travel•blog•lifestyle",
-   "reels": 49,
-   "updated": "2026-09-25"
-  },
-  {
-   "handle": "joe.karir",
-   "models": [
-    "jev"
-   ],
-   "full_name": "Joe | Sukses Muda Realistis",
-   "reels": 50,
-   "updated": "2026-09-25"
-  },
-  {
-   "handle": "liamottley",
-   "models": [
-    "gpt",
-    "jev"
-   ],
-   "full_name": "Liam Ottley",
-   "reels": 3,
-   "updated": "2026-09-25"
-  },
-  {
-   "handle": "nateherkai",
-   "models": [
-    "claude"
-   ],
-   "full_name": "Nate Herk",
-   "reels": 50,
-   "updated": "2026-09-25"
-  },
-  {
    "handle": "nick_saraev",
    "models": [
     "jev"

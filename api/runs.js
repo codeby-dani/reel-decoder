@@ -1,5 +1,8 @@
 // GET → the five most recent decode runs, so the dashboard can show progress.
+const authorized = require("./_auth");
+
 module.exports = async (req, res) => {
+  if (!authorized(req, res)) return; // run titles and progress name the account being decoded
   const repo = process.env.GITHUB_REPO;
   const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/decode.yml/runs?per_page=5`, {
     headers: {

@@ -7,10 +7,10 @@
 --model    gpt | jev | both
 
 Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription),
-     AI_GATEWAY_API_KEY or TYPESAFE_API_KEY (for jev).
+     TYPESAFE_API_KEY or AI_GATEWAY_API_KEY (for jev).
 Writes docs/data/<handle>/<model>.json, thumbs, a transcript cache, and docs/data/index.json.
 """
-import argparse, datetime, io, json, os, pathlib, re, subprocess, sys, tempfile, threading, time
+import argparse, datetime, io, json, os, pathlib, re, statistics, subprocess, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 import openai
@@ -20,22 +20,30 @@ from openai import OpenAI
 from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DATA = ROOT / "docs" / "data"
-GPT_MODEL = os.environ.get("GPT_MODEL") or "gpt-5-mini"
+# The workflow in the private repo points this at its own data/ folder; the default is the public example data.
+DATA = pathlib.Path(os.environ.get("DECODE_DATA_DIR") or ROOT / "docs" / "data")
+GPT_MODEL = os.environ.get("GPT_MODEL") or "gpt-6-luna"
+# Jev doesn't reason before answering, so GPT runs with reasoning off to keep the timing comparable.
+# Set GPT_REASONING=default to leave the model's own setting.
+GPT_REASONING = os.environ.get("GPT_REASONING") or "none"
 # Used when the OpenAI account can't access GPT_MODEL (e.g. gpt-5 models need a verified organization).
 GPT_FALLBACK = "gpt-4.1-mini"
 _fallback_lock = threading.Lock()
 TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL") or "gpt-4o-mini-transcribe"
-# Jev runs through Vercel AI Gateway when AI_GATEWAY_API_KEY is set, else TypeSafe directly.
-if os.environ.get("AI_GATEWAY_API_KEY"):
-    JEV_URL, JEV_KEY_ENV = "https://ai-gateway.vercel.sh/typesafe/v1/systemone", "AI_GATEWAY_API_KEY"
-    JEV_MODEL = os.environ.get("JEV_MODEL") or "typesafe-ai/jev"
-else:
+# Jev goes to TypeSafe directly when TYPESAFE_API_KEY is set, else through Vercel AI Gateway
+# (the gateway returned 429/503 on 6 of 50 reels in the 25 Sep run).
+if os.environ.get("TYPESAFE_API_KEY"):
     JEV_URL, JEV_KEY_ENV = "https://api.typesafe.ai/v1/systemone", "TYPESAFE_API_KEY"
     JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-latest"
+else:
+    JEV_URL, JEV_KEY_ENV = "https://ai-gateway.vercel.sh/typesafe/v1/systemone", "AI_GATEWAY_API_KEY"
+    JEV_MODEL = os.environ.get("JEV_MODEL") or "typesafe-ai/jev"
 MAX_SENTENCES = 40
-WORKERS = 8      # reels transcribed / labelled by GPT at the same time
-JEV_WORKERS = 4  # Jev's upstream rate-limits bursts, so fewer at once
+WORKERS = 8        # reels transcribed at the same time
+LABEL_WORKERS = 4  # reels labelled at the same time, the same for GPT and Jev so the times compare
+# USD per 1M tokens (input, output), from the Vercel AI Gateway model list on 3 Oct 2026.
+PRICES = {"jev": (0.042, 0.0), "gpt-6-luna": (0.10, 0.50), "gpt-6-sol": (2.00, 10.00), "gpt-6.1-sol": (2.00, 10.00),
+          "gpt-5.6-luna": (0.20, 1.20), "gpt-5-mini": (0.25, 2.00), "gpt-4.1-mini": (0.40, 1.60)}
 PROGRESS_STORE = "reel-decoder-progress"  # Apify key-value store the dashboard reads
 
 # The taxonomy. Keys are the labels; values are the definitions both models see.
@@ -240,6 +248,9 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
                   {"role": "user", "content": script_block(sents, caption)}],
         response_format={"type": "json_schema",
                          "json_schema": {"name": "labels", "strict": True, "schema": schema}})
+    if GPT_REASONING != "default":
+        request["reasoning_effort"] = GPT_REASONING
+    t = time.perf_counter()
     try:
         res = oa.chat.completions.create(model=model, **request)
     except openai.NotFoundError as e:
@@ -250,10 +261,16 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
                 summary(f"⚠️ `{GPT_MODEL}` isn't available on this OpenAI account ({e.message[:160]}). "
                         f"Using `{GPT_FALLBACK}` instead.")
                 GPT_MODEL = GPT_FALLBACK
-        res = oa.chat.completions.create(model=GPT_FALLBACK, **request)
+        model = GPT_FALLBACK
+        request.pop("reasoning_effort", None)  # the fallback isn't a reasoning model
+        t = time.perf_counter()
+        res = oa.chat.completions.create(model=model, **request)
+    ms = (time.perf_counter() - t) * 1000
     out = json.loads(res.choices[0].message.content)
     roles = (out["roles"] + ["payoff"] * len(sents))[:len(sents)]
-    return {**out, "roles": roles, "tokens": res.usage.total_tokens if res.usage else 0}
+    u = res.usage
+    return {**out, "roles": roles, "ms": ms, "retries": 0, "price_key": model,
+            "in_tok": u.prompt_tokens if u else 0, "out_tok": u.completion_tokens if u else 0}
 
 
 def label_jev(sents, caption, key: str) -> dict:
@@ -269,9 +286,11 @@ def label_jev(sents, caption, key: str) -> dict:
         q[f"s{i}"] = {"type": "choice", "criteria": ROLES,
                       "instructions": f"What role does sentence [{i}] play in the script?"}
     body = {"state": script_block(sents, caption), "model": JEV_MODEL, "questions": q}
-    for attempt in range(5):  # Jev returns 429/503 under load; back off 2, 4, 8, 16s
+    for attempt in range(5):  # Jev returns 429/503/520 under load; back off 2, 4, 8, 16s
+        t = time.perf_counter()
         r = requests.post(JEV_URL, timeout=60, headers={"Authorization": f"Bearer {key}"}, json=body)
-        if r.status_code not in (429, 500, 502, 503, 504):
+        ms = (time.perf_counter() - t) * 1000  # the answering call only; back-off waits show up in wall time
+        if r.status_code not in (429, 500, 502, 503, 504, 520, 522, 524):
             break
         time.sleep(2 ** (attempt + 1))
     if r.status_code != 200:
@@ -281,7 +300,9 @@ def label_jev(sents, caption, key: str) -> dict:
             "format": a["format"]["choice"], "ask": a["ask"]["choice"],
             "roles": [a[f"s{i}"]["choice"] for i in range(len(sents))],
             "confidence": round(a["hook"].get("confidence", 0), 2),
-            "tokens": r.json().get("usage", {}).get("input_tokens", 0)}
+            "ms": ms, "retries": attempt, "price_key": "jev",
+            "in_tok": r.json().get("usage", {}).get("input_tokens", 0),
+            "out_tok": r.json().get("usage", {}).get("output_tokens", 0)}
 
 
 # ---------- output ----------
@@ -365,7 +386,7 @@ def run(args, models, apify, oa, progress):
 
     broken = []
     for model in models:
-        out, tokens, failed, first_error = [], 0, 0, None
+        out, labs, failed, first_error = [], [], 0, None
         t0 = time.time()
 
         def label(r):
@@ -384,9 +405,10 @@ def run(args, models, apify, oa, progress):
             progress.tick()
             return result
 
-        with ThreadPoolExecutor(JEV_WORKERS if model == "jev" else WORKERS) as pool:
+        with ThreadPoolExecutor(LABEL_WORKERS) as pool:
             results = list(pool.map(label_and_tick, reels))
         retry = [i for i, res in enumerate(results) if res[3]]
+        second_pass = len(retry)
         if retry:  # one more, slower pass for reels that hit rate limits
             print(f"  retrying {len(retry)} reels one at a time...")
             time.sleep(5)
@@ -399,7 +421,7 @@ def run(args, models, apify, oa, progress):
                 failed += 1
                 first_error = first_error or str(err)
                 continue
-            tokens += lab.get("tokens", 0)
+            labs.append(lab)
             words = sum(len(s.split()) for s in sents)
             out.append({
                 "shortCode": code, "timestamp": r.get("timestamp"),
@@ -408,6 +430,7 @@ def run(args, models, apify, oa, progress):
                 "duration": round(r.get("videoDuration") or 0, 1), "pinned": bool(r.get("isPinned")),
                 "caption": caption, "hook": lab["hook"], "topic": lab["topic"],
                 "format": lab["format"], "cta": lab["ask"], "confidence": lab.get("confidence"),
+                "ms": round(lab["ms"]),
                 "hook_line": sents[0] if words > 12 else caption[:140],
                 "thumb": f"data/{handle}/thumbs/{code}.jpg",
                 "segs": [[role, s] for role, s in zip(lab["roles"], sents)],
@@ -417,14 +440,28 @@ def run(args, models, apify, oa, progress):
             broken.append(model)
             continue
         full_name = reels[0].get("ownerFullName") or handle
+        in_tok, out_tok = sum(l["in_tok"] for l in labs), sum(l["out_tok"] for l in labs)
+        price = PRICES.get(labs[0]["price_key"])
+        stats = {
+            "wall_s": round(time.time() - t0, 1), "workers": LABEL_WORKERS,
+            "median_ms": round(statistics.median(l["ms"] for l in labs)),
+            "labelled": len(out), "failed": failed,
+            "retries": sum(l["retries"] for l in labs) + second_pass,
+            "in_tok": in_tok, "out_tok": out_tok,
+            "cost_usd": round(in_tok / 1e6 * price[0] + out_tok / 1e6 * price[1], 6) if price else None,
+            "reasoning": (GPT_REASONING if labs[0]["price_key"] != GPT_FALLBACK else None) if model == "gpt" else None,
+            "price_per_1m": price, "endpoint": "openai" if model == "gpt" else JEV_URL.split("/")[2],
+        }
         (folder / f"{model}.json").write_text(json.dumps({
             "handle": handle, "full_name": full_name, "model": model,
             "model_id": GPT_MODEL if model == "gpt" else JEV_MODEL,
             "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            "reels": out}, ensure_ascii=False))
+            "stats": stats, "reels": out}, ensure_ascii=False))
         update_index(handle, full_name, model, len(out))
-        summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} in {time.time() - t0:.0f}s "
-                f"({failed} failed, {tokens:,} tokens).")
+        cost = f"${stats['cost_usd']:.4f}" if price else "no price on file"
+        summary(f"✅ **{model}** labelled {len(out)} reels of @{handle} in {stats['wall_s']:.0f}s, "
+                f"median {stats['median_ms']} ms per reel, {LABEL_WORKERS} at a time "
+                f"({failed} failed, {stats['retries']} retries, {in_tok:,} in + {out_tok:,} out tokens, {cost}).")
     progress.stage("save")
     if broken:
         sys.exit(f"Labelling failed completely for: {', '.join(broken)}. See the errors above.")
