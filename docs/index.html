@@ -191,13 +191,13 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
     </div>
     <div style="display:flex;flex-direction:column;gap:12px">
       <h2>Run the decode</h2>
-      <div class="field"><span class="lbl">Account</span><b id="pick" style="font-size:16px">Pick one from the search</b></div>
+      <div class="field"><span class="lbl">Account</span><b id="pick" style="font-size:16px">Search on the left, then pick an account</b></div>
       <div class="row">
         <div class="field"><span class="lbl">Label with</span><div class="seg-ctl" id="dmodel" role="group" aria-label="Model to label with">
           <button type="button" id="dm-gpt" data-m="gpt" aria-pressed="true">GPT</button><button type="button" id="dm-jev" data-m="jev" aria-pressed="false">Jev</button><button type="button" id="dm-both" data-m="both" aria-pressed="false">Both</button></div></div>
         <div class="field" style="flex:0 1 110px"><label class="lbl" for="dlimit">Reels</label><input id="dlimit" type="number" min="5" max="200" value="50"></div>
       </div>
-      <div class="field"><label class="lbl" for="pass">Passcode</label><input id="pass" type="password" autocomplete="current-password" placeholder="Your DECODE_PASSCODE"></div>
+      <div class="field"><label class="lbl" for="pass">Passcode</label><input id="pass" type="password" autocomplete="current-password" placeholder="Your DECODE_PASSCODE"><p class="msg" id="pmsg" role="status"></p></div>
       <div><button class="btn" id="go" type="button" disabled>Decode</button></div>
       <p class="msg" id="dmsg" role="status"></p>
       <div><span class="lbl">Recent runs</span><div class="runs" id="runs"><span class="note">Loading…</span></div></div>
@@ -256,7 +256,11 @@ let INDEX = [], ACC = null, MODEL = null, REELS = [], live = [], base = 0, byHoo
 async function loadIndex(){
   let pub = [], priv = [];
   try { pub = (await (await fetch("data/index.json",{cache:"no-store"})).json()).accounts || []; } catch {}
-  if($("pass").value.trim()){ try { priv = ((await api("data?path=index.json")).accounts || []).map(a=>({...a, priv:true})); } catch {} }
+  $("pmsg").textContent = "";
+  if($("pass").value.trim()){
+    try { priv = ((await api("data?path=index.json")).accounts || []).map(a=>({...a, priv:true})); $("pmsg").textContent = `Your private accounts are loaded (${priv.length}).`; $("pmsg").className = "msg ok"; }
+    catch(e){ $("pmsg").textContent = `Couldn't load your private accounts: ${e.message}`; $("pmsg").className = "msg err"; }
+  }
   INDEX = [...priv, ...pub.filter(a=>!priv.some(x=>x.handle===a.handle))].filter(a=>a.reels>0 && a.models?.length).sort((a,b)=>a.handle.localeCompare(b.handle));
 }
 
@@ -604,6 +608,7 @@ async function resumeJob(){
   try {
     const saved = JSON.parse(store.get("job") || "null");
     if(saved?.id) return track(saved.id, saved.hint || {});
+    if(!$("pass").value.trim()) return; // visitors have no runs to follow
     const { runs } = await api("runs");
     const live = runs.find(w => w.status !== "completed");
     if(live) track(live.id);

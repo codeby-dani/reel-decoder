@@ -16,7 +16,12 @@ module.exports = async (req, res) => {
       "X-GitHub-Api-Version": "2022-11-28",
     },
   });
-  if (r.status === 404) return res.status(404).json({ error: "Not decoded yet." });
+  if (r.status === 404)
+    return res.status(404).json({ error: path === "index.json"
+      ? `No data/index.json in ${process.env.GITHUB_REPO}, or GITHUB_TOKEN can't read its contents (needs Contents: Read).`
+      : "Not decoded yet." });
+  if (r.status === 401 || r.status === 403)
+    return res.status(502).json({ error: `GitHub refused the token (${r.status}). GITHUB_TOKEN needs Contents: Read on ${process.env.GITHUB_REPO}.` });
   if (!r.ok) return res.status(502).json({ error: `GitHub ${r.status}` });
   res.setHeader("Content-Type", path.endsWith(".jpg") ? "image/jpeg" : "application/json; charset=utf-8");
   res.status(200).send(Buffer.from(await r.arrayBuffer()));
