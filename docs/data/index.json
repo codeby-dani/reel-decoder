@@ -1,6 +1,16 @@
 {
  "accounts": [
   {
+   "handle": "nateherkai",
+   "models": [
+    "gpt",
+    "jev"
+   ],
+   "full_name": "Nate Herk",
+   "reels": 49,
+   "updated": "2026-10-03"
+  },
+  {
    "handle": "nick_saraev",
    "models": [
     "jev"
