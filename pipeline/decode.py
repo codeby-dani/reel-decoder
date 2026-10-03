@@ -166,7 +166,7 @@ def resolve_handle(account: str, apify: ApifyClient) -> str:
         return account[1:].lower()
     print(f"Searching Instagram for '{account}'...")
     run = apify.actor("apify/instagram-search-scraper").call(
-        run_input={"search": account, "searchType": "user", "searchLimit": 5})
+        run_input={"search": re.sub(r"[^\w\s]+", " ", account).strip(), "searchType": "user", "searchLimit": 5})
     users = run_items(apify, run)
     users = rank_users(users, account)
     if not users:

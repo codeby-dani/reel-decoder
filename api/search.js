@@ -41,13 +41,19 @@ module.exports = async (req, res) => {
 
   if (req.method === "POST") {
     const q = String(req.body?.q || "").trim().slice(0, 80);
-    if (!q) return res.status(400).json({ error: "Type a name or handle to search." });
+    // The Apify actor rejects punctuation in the search term (a handle like "daaan.eh" gets a 400),
+    // so search on the words and let rank() match the original handle.
+    const term = q.replace(/[!?.,:;\-+=*&%$#@/\\~^|<>()[\]{}"'`]+/g, " ").replace(/\s+/g, " ").trim();
+    if (!term) return res.status(400).json({ error: "Type a name or handle to search." });
     const r = await fetch(`${APIFY}/acts/apify~instagram-search-scraper/runs?token=${token}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ search: q, searchType: "user", searchLimit: 8 }),
+      body: JSON.stringify({ search: term, searchType: "user", searchLimit: 8 }),
     });
-    if (!r.ok) return res.status(502).json({ error: `Couldn't start the Instagram search (Apify ${r.status}). Check APIFY_TOKEN.` });
+    if (!r.ok) {
+      const why = (await r.json().catch(() => ({}))).error?.message || "";
+      return res.status(502).json({ error: `Couldn't start the Instagram search (Apify ${r.status}). ${r.status === 401 ? "Check APIFY_TOKEN." : why.slice(0, 160)}` });
+    }
     const { data } = await r.json();
     return res.status(200).json({ runId: data.id });
   }
