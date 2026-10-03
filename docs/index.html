@@ -563,7 +563,7 @@ async function poll(){
       : st==="save" || st==="done" ? ["save", 92, "Saving results…"] : ["setup", 8, st];
     show({ ...base, stageKey:view[0], pct:view[1], text:view[2], progress:p });
   }
-  jobTimer = setTimeout(poll, 2500);
+  jobTimer = setTimeout(poll, p.stage==="label" || p.stage==="transcribe" ? 1000 : 2500);
 }
 
 // Rough remaining time from typical stage durations (seconds), for the "about N left" hint.

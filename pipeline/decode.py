@@ -103,29 +103,40 @@ ROLES = {
 # ---------- progress (read by the dashboard through /api/progress) ----------
 
 class Progress:
-    """Writes {stage, done, total, ...} to an Apify key-value record, at most every 1.5s."""
+    """Writes {stage, done, total, ...} to an Apify key-value record. Stage changes are written right away;
+    per-reel ticks are flushed by a background thread every 0.5s, so labelling never waits on a write."""
 
     def __init__(self, apify: ApifyClient):
         self.run_id = os.environ.get("GITHUB_RUN_ID")
-        self.state, self.last, self.lock = {"stage": "starting"}, 0.0, threading.Lock()
+        self.state, self.dirty, self.lock = {"stage": "starting"}, False, threading.Lock()
         self.kv = None
         if self.run_id:
             try:
                 self.kv = apify.key_value_store(apify.key_value_stores().get_or_create(name=PROGRESS_STORE).id)
+                threading.Thread(target=self._flush_loop, daemon=True).start()
             except Exception as e:
                 print(f"  progress disabled: {e}")
 
-    def update(self, force=False, **fields):
+    def _write(self):
         with self.lock:
-            self.state.update(fields, updated=time.time())
-            if not self.kv or (not force and time.time() - self.last < 1.5):
-                return
-            self.last = time.time()
-            state = dict(self.state)
+            state, self.dirty = dict(self.state), False
         try:
             self.kv.set_record(f"run-{self.run_id}", state)
         except Exception as e:
             print(f"  progress write failed: {e}")
+
+    def _flush_loop(self):
+        while True:
+            time.sleep(0.5)
+            if self.dirty:
+                self._write()
+
+    def update(self, force=False, **fields):
+        with self.lock:
+            self.state.update(fields, updated=time.time())
+            self.dirty = True
+        if self.kv and force:
+            self._write()
 
     def stage(self, name, **fields):
         self.update(force=True, stage=name, done=0, **fields)
@@ -133,7 +144,7 @@ class Progress:
     def tick(self):
         with self.lock:
             self.state["done"] = self.state.get("done", 0) + 1
-        self.update(force=self.state["done"] == self.state.get("total"))
+            self.dirty = True
 
 
 # ---------- account + scraping ----------
@@ -407,6 +418,7 @@ def run(args, models, apify, oa, progress):
 
         with ThreadPoolExecutor(LABEL_WORKERS) as pool:
             results = list(pool.map(label_and_tick, reels))
+        progress.update(force=True)  # show the full count before the next stage resets it
         retry = [i for i, res in enumerate(results) if res[3]]
         second_pass = len(retry)
         if retry:  # one more, slower pass for reels that hit rate limits
