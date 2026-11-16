@@ -26,6 +26,8 @@ Each run records how long labelling took, the median time per reel and the cost 
 
 To show an account to visitors, copy its `<model>.json` and `thumbs/` from the private repo's `data/<handle>/` into `docs/data/<handle>/` here and add it to `docs/data/index.json`.
 
+The labels default to the creator set (hook types like "Capability unlock", tuned for AI creators). For a company's brand account, run with taxonomy **b2b** (`--taxonomy b2b`, or the workflow's taxonomy input): hooks like "Relatable pain" and "POV / skit", topics like "Customer story", and sign-up or link-in-bio calls to action. The decode file stores its hook list, so the dashboard colours whichever set was used.
+
 Transcripts are cached per account, so re-running with the other model doesn't pay for transcription again.
 
 ## Vercel environment variables

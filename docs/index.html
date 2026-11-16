@@ -236,8 +236,11 @@ footer{color:var(--muted);font-size:12.5px;max-width:90ch}
 </div>
 
 <script>
-const HOOKS = ["Capability unlock","Breaking news","Hot take","Personal experiment","Money angle","Someone built","How-to / explainer","Other"];
-const HC = {}; HOOKS.forEach((h,i)=>HC[h]=`var(--h${i+1})`);
+// Decodes made with --taxonomy b2b carry their own hook list; older files use the creator list.
+const CREATOR_HOOKS = ["Capability unlock","Breaking news","Hot take","Personal experiment","Money angle","Someone built","How-to / explainer","Other"];
+let HOOKS = CREATOR_HOOKS, HC = {};
+const setHooks = list => { HOOKS = list?.length ? list : CREATOR_HOOKS; HC = {}; HOOKS.forEach((h,i)=>HC[h]=`var(--h${Math.min(i+1,8)})`); };
+setHooks();
 const MODELS = {gpt:"GPT", jev:"Jev", claude:"Claude"};
 const fmt = n => n>=1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n>=1e3 ? (n/1e3).toFixed(n>=1e5?0:1)+"K" : String(Math.round(n));
 const med = a => { const s=[...a].sort((x,y)=>x-y), m=s.length>>1; return s.length ? (s.length%2 ? s[m] : (s[m-1]+s[m])/2) : 0; };
@@ -279,6 +282,7 @@ async function openAccount(acc, model){
   history.replaceState(null, "", "#"+acc.handle.replace(/[^A-Za-z0-9._~-]/g,""));
   renderModels();
   const d = acc.priv ? await api(`data?path=${acc.handle}/${MODEL}.json`) : await (await fetch(`data/${acc.handle}/${MODEL}.json`,{cache:"no-store"})).json();
+  setHooks(d.hooks);
   REELS = d.reels.filter(r=>r.plays>0);
   if(!REELS.length){ $("handle").textContent = "@"+acc.handle; $("sub").textContent = "This decode has no reels with play counts yet. Run it again from “Decode a new account”."; return; }
   live = REELS.filter(r=>!r.pinned); if(!live.length) live = REELS;

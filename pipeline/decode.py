@@ -5,6 +5,7 @@
 --account  "@handle" or a profile link = that exact account.
            Anything else (e.g. "nate herk") = Instagram search, top result by followers.
 --model    gpt | jev | both
+--taxonomy creator (default, AI/creator tutorials) | b2b (brand accounts of B2B companies)
 
 Env: APIFY_TOKEN, OPENAI_API_KEY (always, for transcription),
      TYPESAFE_API_KEY or AI_GATEWAY_API_KEY (for jev).
@@ -98,6 +99,61 @@ ROLES = {
     "payoff": "The result, proof, demo outcome or key benefit.",
     "pitch": "The call to action: comment, follow, link.",
 }
+
+# A second taxonomy for brand accounts of B2B companies (SaaS, POS, payments), where the reels are skits,
+# customer stories and product demos rather than creator tutorials. Keep at most 8 hooks: the dashboard has 8 colours.
+B2B_HOOKS = {
+    "Relatable pain": "Opens on a work frustration the viewer lives (\"When the client asks for one more change...\", \"Nobody tells you running a shop means...\").",
+    "POV / skit": "Opens a scripted scene, character or POV meme (\"POV: it's your first day in sales\", two people acting out an office moment).",
+    "Bold claim / stat": "Opens with a number, a result or a strong claim (\"We cut our close from 10 days to 2\", \"80% of small businesses...\").",
+    "Product reveal": "Opens by launching or showing a feature or update (\"Introducing...\", \"New in X\", \"You can now...\").",
+    "Question": "Opens by asking the viewer a direct question (\"Still doing payroll in a spreadsheet?\").",
+    "Real person intro": "Opens on a real customer, employee or founder introducing themselves or their business (\"I'm Maya and I own a bakery in Austin\").",
+    "Tip / how-to": "Opens by promising a tip, a lesson or a walkthrough (\"Here's how to...\", \"3 things every manager should...\").",
+    "Other": "Music, no speech, or an opener that fits none of the above.",
+}
+B2B_TOPICS = {
+    "Workplace humor": "Jokes about office or work life; the product is absent or a passing mention.",
+    "Product feature": "Shows or explains a specific feature or use of the company's product.",
+    "Customer story": "A real customer's business and how they run it, with or without the product.",
+    "Business tips": "Advice for the audience's job or business that is useful without the product.",
+    "Small business life": "The day-to-day of owning or running a shop, restaurant or small company.",
+    "Launch & events": "A product launch, conference, partnership or company announcement.",
+    "Brand & culture": "The company's own team, office, values or behind the scenes.",
+    "Trend / pop culture": "Rides a trending audio, meme, celebrity or pop-culture moment.",
+    "Other": "Anything else.",
+}
+B2B_FORMATS = {
+    "Skit": "Acted scene with characters, usually comedic.",
+    "Talking head": "One person speaking to camera without a demo.",
+    "Product demo": "Shows the product's screen or the product in use.",
+    "Customer testimonial": "A real customer talks about their business or the product.",
+    "Interview / street": "Questions put to employees, customers or people on the street.",
+    "Meme / text overlay": "Footage or trending audio with the message carried by on-screen text.",
+    "Behind the scenes": "Unscripted look at the team, office, event or a customer's workplace.",
+    "Animation / motion": "Animated graphics or motion design.",
+    "Music / visual only": "No meaningful speech and no clear on-screen story.",
+}
+B2B_ASKS = {
+    "Try / sign up": "Start a free trial, sign up, book a demo or download the app.",
+    "Link in bio": "Visit a link, the website or learn more, without a direct sign-up ask.",
+    "Comment keyword": "Comment a word to get a link, guide or resource sent to you.",
+    "Event / webinar": "Register for or attend an event, webinar or livestream.",
+    "Engage": "Tag a coworker, share, or comment an opinion (no reward).",
+    "Follow": "Follow the account or stay tuned.",
+    "None": "No call to action.",
+}
+
+TAXONOMIES = {
+    "creator": {"hooks": HOOKS, "topics": TOPICS, "formats": FORMATS, "asks": ASKS,
+                "context": "You label short-form video scripts from creator accounts.",
+                "ask_q": "What does the viewer get for acting on the call to action?"},
+    "b2b": {"hooks": B2B_HOOKS, "topics": B2B_TOPICS, "formats": B2B_FORMATS, "asks": B2B_ASKS,
+            "context": "You label short-form video scripts from the brand account of a B2B company "
+                       "(software, payments or tools sold to businesses). Use the caption when there is little speech.",
+            "ask_q": "What does the call to action ask the viewer to do?"},
+}
+TAX = TAXONOMIES["creator"]  # set from --taxonomy in main()
 
 
 # ---------- progress (read by the dashboard through /api/progress) ----------
@@ -244,17 +300,17 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
     schema = {
         "type": "object", "additionalProperties": False,
         "required": ["hook", "topic", "format", "ask", "roles"],
-        "properties": {"hook": enum(HOOKS), "topic": enum(TOPICS), "format": enum(FORMATS),
-                       "ask": enum(ASKS), "roles": {"type": "array", "items": enum(ROLES)}},
+        "properties": {"hook": enum(TAX["hooks"]), "topic": enum(TAX["topics"]), "format": enum(TAX["formats"]),
+                       "ask": enum(TAX["asks"]), "roles": {"type": "array", "items": enum(ROLES)}},
     }
     defs = "\n\n".join(f"{name}:\n" + "\n".join(f"- {k}: {v}" for k, v in d.items())
-                       for name, d in [("hook", HOOKS), ("topic", TOPICS), ("format", FORMATS),
-                                       ("ask", ASKS), ("roles", ROLES)])
+                       for name, d in [("hook", TAX["hooks"]), ("topic", TAX["topics"]), ("format", TAX["formats"]),
+                                       ("ask", TAX["asks"]), ("roles", ROLES)])
     global GPT_MODEL
     model = GPT_MODEL
     request = dict(
         messages=[{"role": "system", "content":
-                   "You label short-form video scripts. Classify the hook by the FIRST sentence only. "
+                   f"{TAX['context']} Classify the hook by the FIRST sentence only. "
                    f"Return one role per numbered sentence, in order ({len(sents)} roles).\n\n{defs}"},
                   {"role": "user", "content": script_block(sents, caption)}],
         response_format={"type": "json_schema",
@@ -286,12 +342,11 @@ def label_gpt(sents, caption, oa: OpenAI) -> dict:
 
 def label_jev(sents, caption, key: str) -> dict:
     q = {
-        "hook": {"type": "choice", "criteria": HOOKS,
+        "hook": {"type": "choice", "criteria": TAX["hooks"],
                  "instructions": "Which hook type does the FIRST sentence [0] use?"},
-        "topic": {"type": "choice", "criteria": TOPICS, "instructions": "What is this reel mainly about?"},
-        "format": {"type": "choice", "criteria": FORMATS, "instructions": "What format is this reel?"},
-        "ask": {"type": "choice", "criteria": ASKS,
-                "instructions": "What does the viewer get for acting on the call to action?"},
+        "topic": {"type": "choice", "criteria": TAX["topics"], "instructions": "What is this reel mainly about?"},
+        "format": {"type": "choice", "criteria": TAX["formats"], "instructions": "What format is this reel?"},
+        "ask": {"type": "choice", "criteria": TAX["asks"], "instructions": TAX["ask_q"]},
     }
     for i in range(len(sents)):
         q[f"s{i}"] = {"type": "choice", "criteria": ROLES,
@@ -343,7 +398,11 @@ def main():
     ap.add_argument("--account", required=True)
     ap.add_argument("--model", choices=["gpt", "jev", "both"], default="gpt")
     ap.add_argument("--limit", type=int, default=50)
+    ap.add_argument("--taxonomy", choices=list(TAXONOMIES), default="creator",
+                    help="creator = AI/creator tutorials; b2b = brand accounts of B2B companies")
     args = ap.parse_args()
+    global TAX
+    TAX = TAXONOMIES[args.taxonomy]
 
     models = ["gpt", "jev"] if args.model == "both" else [args.model]
     if "jev" in models and not os.environ.get(JEV_KEY_ENV):
@@ -467,6 +526,7 @@ def run(args, models, apify, oa, progress):
         (folder / f"{model}.json").write_text(json.dumps({
             "handle": handle, "full_name": full_name, "model": model,
             "model_id": GPT_MODEL if model == "gpt" else JEV_MODEL,
+            "taxonomy": args.taxonomy, "hooks": list(TAX["hooks"]),
             "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "stats": stats, "reels": out}, ensure_ascii=False))
         update_index(handle, full_name, model, len(out))
